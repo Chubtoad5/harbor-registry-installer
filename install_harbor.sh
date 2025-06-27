@@ -47,6 +47,7 @@ function install_harbor {
   debug_run run_harbor_installer
   debug_run create_harbor_service
   echo "# ---  Harbor Install Completed! --- #"
+  echo "  Harbor install and compose files are in /opt/harbor and /data directories"
   echo "  Harbor Version: $HARBOR_VERSION"
   echo "  URL: https://$mgmt_ip:$HARBOR_PORT"
   echo "  FQDN URL: https://$REGISTRY_COMMON_NAME:$HARBOR_PORT"
@@ -178,12 +179,21 @@ function harbor_cert_install () {
 
 function run_harbor_installer() {
   if [ -f $base_dir/harbor-install-files/VERSION.txt ]; then
-    tar xzvf $base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz
+    tar xzvf $base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz -C /opt/
   else
     curl -fsSLo $base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz https://github.com/goharbor/harbor/releases/download/v$HARBOR_VERSION/harbor-offline-installer-v$HARBOR_VERSION.tgz
-    tar xzvf $base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz -C $base_dir/harbor-install-files/
+    tar xzvf $base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz -C /opt/
   fi
-  $base_dir/harbor-install-files/harbor/install.sh
+  /opt/harbor/install.sh
+  echo "creating crumb file..."
+  cat > $base_dir/harbor-install-files/read_this_crumb.txt <<EOF
+Harbor install files are located in /opt/harbor and /data directories
+Version: $HARBOR_VERSION"
+URL: https://$mgmt_ip:$HARBOR_PORT"
+FQDN URL: https://$REGISTRY_COMMON_NAME:$HARBOR_PORT"
+Default Username: $HARBOR_USERNAME"
+Default Password: $HARBOR_PASSWORD"
+EOF
 }
 
 function create_harbor_service () {
@@ -198,8 +208,8 @@ Requires=docker.service
 Type=forking
 Restart=on-failure
 RestartSec=5
-ExecStart=/usr/bin/docker compose -f $base_dir/harbor-install-files/harbor/docker-compose.yml up -d
-ExecStop=/usr/bin/docker compose -f $base_dir/harbor-install-files/harbor/docker-compose.yml down
+ExecStart=/usr/bin/docker compose -f /opt/harbor/docker-compose.yml up -d
+ExecStop=/usr/bin/docker compose -f /opt/harbor/docker-compose.yml down
 RemainAfterExit=true
 
 [Install]
