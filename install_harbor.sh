@@ -245,7 +245,7 @@ function prepare_offline_package() {
 
 function new_cert_check() {
   echo "soon..."
-  # Develop a function to cehck for $NEW_CERT_GEN to determine if a new self-signed certificate is to be generated, then do it
+  # Develop a function to check for $NEW_CERT_GEN to determine if a new self-signed certificate is to be generated, then do it
   # If user supplies certs, use openssl to verify and get the common name
   # stop harbor contaners
   # copy to docker certs.d with new common name and restart
@@ -314,8 +314,8 @@ function check_root_privileges() {
 # --- File Generation Functions --- #
 
 function gen_harbor_yml () {
-  [ -f $base_dir/harbor-install-files/harbor/harbor.yml ] || mkdir -p $base_dir/harbor-install-files/harbor
-  cat > $base_dir/harbor-install-files/harbor/harbor.yml <<EOF
+  [ -f /opt/harbor/harbor.yml ] || mkdir -p /opt/harbor
+  cat > /opt/harbor/harbor.yml <<EOF
 # Configuration file of Harbor
 
 # The IP address or hostname to access admin UI and registry service.
