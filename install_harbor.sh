@@ -128,6 +128,7 @@ EOF
 
 function cert_gen () {
   echo "Creating self-signed certificate valid for $DURATION_DAYS days..."
+  mkdir -p $base_dir/harbor-install-files/certs
   # Generate CA key
   openssl genrsa -out $base_dir/harbor-install-files/certs/ca.key 4096
   # Generate CA certificate
@@ -180,7 +181,7 @@ function run_harbor_installer() {
     tar xzvf $base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz
   else
     curl -fsSLo $base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz https://github.com/goharbor/harbor/releases/download/v$HARBOR_VERSION/harbor-offline-installer-v$HARBOR_VERSION.tgz
-    tar xzvf $base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz
+    tar xzvf $base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz -C $base_dir/harbor-install-files/
   fi
   $base_dir/harbor-install-files/harbor/install.sh
 }
