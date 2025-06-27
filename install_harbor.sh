@@ -148,7 +148,7 @@ subjectAltName = @alt_names
 
 [alt_names]
 IP.1=$mgmt_ip
-DNS.1=$REGISTRYT_COMMON_NAME
+DNS.1=$REGISTRY_COMMON_NAME
 DNS.2=$current_hostname
 EOF
 
