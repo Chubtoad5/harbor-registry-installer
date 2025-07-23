@@ -188,11 +188,11 @@ function run_harbor_installer() {
   echo "creating crumb file..."
   cat > $base_dir/harbor-install-files/read_this_crumb.txt <<EOF
 Harbor install files are located in /opt/harbor and /data directories
-Version: $HARBOR_VERSION"
-URL: https://$mgmt_ip:$HARBOR_PORT"
-FQDN URL: https://$REGISTRY_COMMON_NAME:$HARBOR_PORT"
-Default Username: $HARBOR_USERNAME"
-Default Password: $HARBOR_PASSWORD"
+Version: $HARBOR_VERSION
+URL: https://$mgmt_ip:$HARBOR_PORT
+FQDN URL: https://$REGISTRY_COMMON_NAME:$HARBOR_PORT
+Default Username: $HARBOR_USERNAME
+Default Password: $HARBOR_PASSWORD
 EOF
 }
 
