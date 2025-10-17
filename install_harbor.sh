@@ -3,37 +3,31 @@
 # This script contains functions for installing a Harbor registry on Ubuntu for storing container images
 
 # --- User Defined Variables --- #
-DEBUG=true
+DEBUG=${DEBUG:-1}
 
 # Harbor configuration
-HARBOR_VERSION=2.12.2
-HARBOR_PORT=443
-HARBOR_USERNAME=admin
-HARBOR_PASSWORD=Harbor12345
-DOCKER_BRIDGE_CIDR=172.30.0.1/16
+HARBOR_VERSION=${HARBOR_VERSION:-2.12.2}
+HARBOR_PORT=${HARBOR_PORT:-443}
+HARBOR_USERNAME=${HARBOR_USERNAME:-admin}
+HARBOR_PASSWORD=${HARBOR_PASSWORD:-Harbor12345}
+DOCKER_BRIDGE_CIDR=${DOCKER_BRIDGE_CIDR:-"172.30.0.1/16"}
 
 # Self-signed certificate 
-DURATION_DAYS=3650
-REGISTRY_COMMON_NAME=regsitry.local.edge
-COUNTRY=US
-STATE=MA
-LOCATION=LAB
-ORGANIZATION=SELF
-
-# Offline Prep Parameters
-
-OFFLINE_APT_PACKAGES=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
-
+COUNTRY=${COUNTRY:-"US"}
+STATE=${STATE:-"MA"}
+LOCATION=${LOCATION:-"BOSTON"}
+ORGANIZATION=${ORGANIZATION:-"SELF"}
+REGISTRY_COMMON_NAME=${REGISTRY_COMMON_NAME:-"regsitry.edge.lab"}
+DURATION_DAYS=${DURATION_DAYS:-"3650"}
 
 # --- INTERNAL VARIABLES (do not edit) --- #
+DOCKER_PACKAGES=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
 base_dir=$(pwd)
-os_release_version=$(lsb_release -ds |tail -1)
-os_release_version_short=$(lsb_release -rs |tail -1)
+os_id=""
 mgmt_ip=$(hostname -I | awk '{print $1}')
 mgmt_if=$(ip a |grep "$(hostname -I |awk '{print $1}')" | awk '{print $NF}')
 user_name=$SUDO_USER
 current_hostname=$(hostname)
-
 
 #### --- Functions --- ###
 
@@ -70,9 +64,6 @@ function uninstall_harbor {
 
 function harbor_offline_prep {
   echo "Preparing an offline package for Harbor registry..."
-  [ -d "$base_dir/harbor-install-files/apt-packages" ] || mkdir -p "$base_dir/harbor-install-files/apt-packages"
-  debug_run apt_get_install dpkg-dev
-  cd $base_dir/harbor-install-files/apt-packages
   debug_run apt_download_packs
   debug_run download_harbor_offline_package
   debug_run prepare_offline_package
@@ -80,40 +71,78 @@ function harbor_offline_prep {
   echo "Upload harbor-offline-package.tar.gz to your airgapped system running $os_release_version"
 }
 
+
+
 function update_certificates {
   echo "soon..."
 }
 
 # --- Install Harbor Functions --- #
 
+os_type() {
+    # Get OS information from /etc/os-release
+    if [[ -f /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        source /etc/os-release
+        echo "OS type is: $ID"
+        os_id="$ID"
+    else
+        echo "Unknown or unsupported OS $os_id."
+        exit 1
+    fi
+}
+
+function add_docker_repo () {
+    echo "Adding docker repo..."
+    case "$os_id" in
+        ubuntu)
+            install -m 0755 -d /etc/apt/keyrings
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+            chmod a+r /etc/apt/keyrings/docker.asc
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+            ;;
+        debian)
+            install -m 0755 -d /etc/apt/keyrings
+            curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+            chmod a+r /etc/apt/keyrings/docker.asc
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+            ;;
+        rhel|rocky|almalinux)
+            dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
+            ;;
+        centos)
+            dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+            ;;
+        fedora)
+            dnf-3 config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+            ;;
+        *)
+            echo "Error: Unsupported OS '$os_id'. Manual install of Docker required."
+            rm -rf /etc/docker
+            exit 1
+            ;;
+    esac
+}
+
+function install_packages_check () {
+    if [[ ! -f $base_dir/harbor-install-files/apt-packages/install_packages.sh ]]; then
+        mkdir -p "$base_dir/harbor-install-files/apt-packages"
+        echo "Downloading install_packages.sh..."
+        curl -sfL https://github.com/Chubtoad5/install-packages/raw/refs/heads/main/install_packages.sh  -o "$base_dir/harbor-install-files/apt-packages/install_packages.sh"
+        chmod +x $base_dir/harbor-install-files/apt-packages/install_packages.sh
+    fi
+}
+
 function install_docker_utility() {
-  if [ -f $base_dir/harbor-install-files/VERSION.txt ]; then
-    echo "deb [trusted=yes] file:$base_dir/harbor-install-files/apt-packages ./" | tee -a /etc/apt/sources.list.d/extra-packages.list
-    echo "Backing up original apt sources for offline installation..."
-    mv /etc/apt/sources.list /etc/apt/sources.list.bak
-    [ $os_release_version_short = "22.04" ] || mv /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.bak
-    [ ! -f /etc/apt/sources.list.d/docker.list ] || mv /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.list.bak
-  fi
-  if [ ! -f $base_dir/harbor-install-files/VERSION.txt ]; then
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-    chmod a+r /etc/apt/keyrings/docker.asc
-    echo \
-      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-      $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
-      sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-  fi
-  apt-get update
-  create_bridge_json
-  echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-  usermod -aG docker $user_name
-  if [ -f $base_dir/harbor-install-files/VERSION.txt ]; then
-    echo "Reverting apt sources..."
-    mv /etc/apt/sources.list.bak /etc/apt/sources.list
-    [ $os_release_version_short = "22.04" ] || mv /etc/apt/sources.list.d/ubuntu.sources.bak /etc/apt/sources.list.d/ubuntu.sources
-    [ ! -f /etc/apt/sources.list.d/docker.list.bak ] || mv /etc/apt/sources.list.d/docker.list.bak /etc/apt/sources.list.d/docker.list
-    rm /etc/apt/sources.list.d/extra-packages.list
-  fi
+    install_packages_check
+    cd $base_dir/harbor-install-files/apt-packages
+    if [[ -f  $base_dir/harbor-install-files/apt-packages/offline-packages.tar.gz ]]; then
+        ./install_packages.sh offline "${DOCKER_PACKAGES[@]}"
+    else
+        add_docker_repo
+        ./install_packages.sh online "${DOCKER_PACKAGES[@]}"
+    fi   
+    cd $base_dir
 }
 
 function create_bridge_json () {
@@ -167,11 +196,11 @@ function harbor_cert_install () {
   cp $base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.cert /etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT/
   cp $base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.key /etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT/
   cp $base_dir/harbor-install-files/certs/ca.crt /etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT/
-  cp $base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.crt /usr/local/share/ca-certificates/
+  # cp $base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.crt /usr/local/share/ca-certificates/
   cp $base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.crt /data/ca_download/ca.crt
 
   # Update certificate store
-  update-ca-certificates
+  # update-ca-certificates
 
   # Restart docker
   systemctl restart docker
@@ -224,10 +253,11 @@ EOF
 # --- Offline Prep Functions --- #
 
 function apt_download_packs () {
-    echo "Downloading "${OFFLINE_APT_PACKAGES[*]}" ..."
-    apt-get download $(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances --no-pre-depends ${OFFLINE_APT_PACKAGES[*]} | grep "^\w")
-    dpkg-scanpackages -m . > Packages
-    echo "Completed downloading..."
+  install_packages_check
+  add_docker_repo
+  cd $base_dir/harbor-install-files/apt-packages
+  ./install_packages.sh save "${DOCKER_PACKAGES[@]}"
+  cd $base_dir
 }
 
 function download_harbor_offline_package() {
@@ -257,52 +287,28 @@ function new_cert_check() {
 
 # --- Utility Functions --- #
 
-function apt_get_install() {
-  echo "Installing $1..."
-  apt-get update
-  # Add a check for successful update before installing
-  if [ $? -ne 0 ]; then
-    echo "ERROR: apt-get update failed."
-    return 1 # Indicate failure
-  fi
-  echo "" | DEBIAN_FRONTEND=noninteractive apt-get -y -qq install "$1"
-  # Check for successful install
-  if [ $? -ne 0 ]; then
-    echo "ERROR: Failed to install $1."
-    return 1 # Indicate failure
-  fi
-  echo "$1 installed successfully."
-  return 0 # Indicate success
-}
-
 function debug_run() {
-  # Check the value of the global DEBUG variable
-  if [ "$DEBUG" = "true" ]; then
-    # If DEBUG is true, execute the command/function normally.
-    # All stdout and stderr will be displayed to the console.
+  if [ "$DEBUG" -eq 1 ]; then
     echo "--- DEBUG: Running '$*' ---"
     "$@"
-    local status=$? # Capture the exit status of the executed command
+    local status=$?
     echo "--- DEBUG: Finished '$*' with status $status ---"
-    return $status # Return the original command's exit status
+    return $status
   else
     echo "Running '$*'..."
-    # If DEBUG is false, execute the command/function and redirect
-    # all standard output (1) and standard error (2) to /dev/null.
-    # This effectively suppresses all output.
     "$@" > /dev/null 2>&1
-    return $? # Return the original command's exit status
+    return $?
   fi
 }
 
-function check_os_version() {
-  if [[ $os_release_version_short = "22.04" || $os_release_version_short = "24.04" ]]; then
-    return 0
-  else
-    echo "This script is only compatible with Ubuntu 22.04 and 24.04 server LTS."
-    exit 1
-  fi
-}
+# function check_os_version() {
+#   if [[ $os_release_version_short = "22.04" || $os_release_version_short = "24.04" ]]; then
+#     return 0
+#   else
+#     echo "This script is only compatible with Ubuntu 22.04 and 24.04 server LTS."
+#     exit 1
+#   fi
+# }
 
 function check_root_privileges() {
   if [[ $EUID != 0 ]]; then
@@ -644,7 +650,7 @@ function help {
   echo "########################################################################"
   echo "Usage: $0 [parameter]"
   echo ""
-  echo "[Parameters]            | [Description]"                   
+  echo "[Parameters]            | [Description]"
   echo "help                    | Display this help message"
   echo "install-harbor          | Installs Harbor regsitry"
   echo "uninstall-harbor        | Uninstalls Harbor registry"
