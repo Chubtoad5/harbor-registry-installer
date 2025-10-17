@@ -93,6 +93,7 @@ os_type() {
 }
 
 function add_docker_repo () {
+    os_type
     echo "Adding docker repo..."
     case "$os_id" in
         ubuntu)
