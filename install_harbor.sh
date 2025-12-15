@@ -26,7 +26,7 @@ base_dir=$(pwd)
 os_id=""
 mgmt_ip=$(hostname -I | awk '{print $1}')
 mgmt_if=$(ip a |grep "$(hostname -I |awk '{print $1}')" | awk '{print $NF}')
-user_name=$SUDO_USER
+user_name=${SUDO_USER:-$(whoami)}
 current_hostname=$(hostname)
 
 #### --- Functions --- ###
@@ -142,7 +142,9 @@ function install_docker_utility() {
     else
         add_docker_repo
         ./install_packages.sh online "${DOCKER_PACKAGES[@]}"
-    fi   
+    fi
+    systemctl enable --now docker || true
+    usermod -aG docker $user_name
     cd $base_dir
 }
 
