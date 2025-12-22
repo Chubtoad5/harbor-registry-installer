@@ -11,6 +11,7 @@ HARBOR_PORT=${HARBOR_PORT:-443}
 HARBOR_USERNAME=${HARBOR_USERNAME:-admin}
 HARBOR_PASSWORD=${HARBOR_PASSWORD:-Harbor12345}
 DOCKER_BRIDGE_CIDR=${DOCKER_BRIDGE_CIDR:-"172.30.0.1/16"}
+PROJECTS=${PROJECTS:-""}
 
 # Self-signed certificate 
 COUNTRY=${COUNTRY:-"US"}
@@ -40,6 +41,7 @@ function install_harbor {
   debug_run gen_harbor_yml
   debug_run run_harbor_installer
   debug_run create_harbor_service
+  debug_run create_harbor_projects
   echo "# ---  Harbor Install Completed! --- #"
   echo "  Harbor install and compose files are in /opt/harbor and /data directories"
   echo "  Harbor Version: $HARBOR_VERSION"
@@ -50,25 +52,26 @@ function install_harbor {
 }
 
 function uninstall_harbor {
-  echo "Uninstalling Harbor registry"
-  echo "Removing containers..."
-  docker compose -f $base_dir/harbor-install-files/harbor/docker-compose.yml down
+  echo "  Uninstalling Harbor registry"
+  echo "  Removing containers..."
+  docker compose -f /opt/harbor/docker-compose.yml down
   systemctl disable --now harbor-docker.service
-  echo "Removing data files..."
+  echo "  Removing data files..."
   rm -rf $base_dir/harbor-install-files
+  rm -rf /opt/harbor
   rm -rf /data
   rm -f /etc/systemd/system/harbor-docker.service
   rm -rf "/etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT" 
-  echo "Uninstallation completed..."
+  echo "  Uninstallation completed..."
 }
 
 function harbor_offline_prep {
-  echo "Preparing an offline package for Harbor registry..."
+  echo "  Preparing an offline package for Harbor registry..."
   debug_run apt_download_packs
   debug_run download_harbor_offline_package
   debug_run prepare_offline_package
-  echo "Offline package generation completed..."
-  echo "Upload harbor-offline-package.tar.gz to your airgapped system running $os_release_version"
+  echo "  Offline package generation completed..."
+  echo "  Upload harbor-offline-package.tar.gz to your airgapped system running $os_release_version"
 }
 
 
@@ -84,7 +87,7 @@ os_type() {
     if [[ -f /etc/os-release ]]; then
         # shellcheck disable=SC1091
         source /etc/os-release
-        echo "OS type is: $ID"
+        echo "  OS type is: $ID"
         os_id="$ID"
     else
         echo "Unknown or unsupported OS $os_id."
@@ -128,7 +131,7 @@ function add_docker_repo () {
 function install_packages_check () {
     if [[ ! -f $base_dir/harbor-install-files/apt-packages/install_packages.sh ]]; then
         mkdir -p "$base_dir/harbor-install-files/apt-packages"
-        echo "Downloading install_packages.sh..."
+        echo "  Downloading install_packages.sh..."
         curl -sfL https://github.com/Chubtoad5/install-packages/raw/refs/heads/main/install_packages.sh  -o "$base_dir/harbor-install-files/apt-packages/install_packages.sh"
         chmod +x $base_dir/harbor-install-files/apt-packages/install_packages.sh
     fi
@@ -149,18 +152,17 @@ function install_docker_utility() {
 }
 
 function create_bridge_json () {
-  echo "pre-creating docker bridge json..."
   mkdir -p /etc/docker
   cat <<EOF | tee /etc/docker/daemon.json > /dev/null
 {
   "bip": "$DOCKER_BRIDGE_CIDR"
 }
 EOF
-  echo "Created /etc/docker/daemon.json with bip: $DOCKER_BRIDGE_CIDR"
+  echo "  Created /etc/docker/daemon.json with bip: $DOCKER_BRIDGE_CIDR"
 }
 
 function cert_gen () {
-  echo "Creating self-signed certificate valid for $DURATION_DAYS days..."
+  echo "  Creating self-signed certificate valid for $DURATION_DAYS days..."
   mkdir -p $base_dir/harbor-install-files/certs
   # Generate CA key
   openssl genrsa -out $base_dir/harbor-install-files/certs/ca.key 4096
@@ -217,7 +219,7 @@ function run_harbor_installer() {
     tar xzvf $base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz -C /opt/
   fi
   /opt/harbor/install.sh
-  echo "creating crumb file..."
+  echo "  creating crumb file..."
   cat > $base_dir/harbor-install-files/read_this_crumb.txt <<EOF
 Harbor install files are located in /opt/harbor and /data directories
 Version: $HARBOR_VERSION
@@ -229,7 +231,7 @@ EOF
 }
 
 function create_harbor_service () {
-    echo "Creating Habor systemd service..."
+    echo "  Creating Habor systemd service..."
     cat > /etc/systemd/system/harbor-docker.service <<EOF
 [Unit]
 Description=Harbor
@@ -268,7 +270,7 @@ function download_harbor_offline_package() {
 }
 
 function prepare_offline_package() {
-  echo "Generating offline archive..."
+  echo "  Generating offline archive..."
   cd $base_dir
   echo "Offline package generated on $(date) for $os_release_version and Harbor version $HARBOR_VERSION" | tee $base_dir/harbor-install-files/VERSION.txt
   tar czvf harbor-offline-package.tar.gz harbor-install-files/ install_harbor.sh
@@ -304,14 +306,73 @@ function debug_run() {
   fi
 }
 
-# function check_os_version() {
-#   if [[ $os_release_version_short = "22.04" || $os_release_version_short = "24.04" ]]; then
-#     return 0
-#   else
-#     echo "This script is only compatible with Ubuntu 22.04 and 24.04 server LTS."
-#     exit 1
-#   fi
-# }
+create_harbor_projects() {
+    local max_attempts=6
+    local wait_seconds=5
+    local attempt=1
+    local connected=false
+    read -a PROJECTS_ARRAY <<< "$PROJECTS"
+    # 1. Connectivity & Auth Pre-Check with Retry Loop
+    echo "  Starting Harbor API health check (Timeout: 30s)..."
+    
+    while [ $attempt -le $max_attempts ]; do
+        local health_status=$(curl -s -o /dev/null -w "%{http_code}" \
+            -u "$HARBOR_USERNAME:$HARBOR_PASSWORD" -k \
+            "https://$REGISTRY_COMMON_NAME:$HARBOR_PORT/api/v2.0/projects?page_size=1")
+
+        if [[ "$health_status" == "200" ]]; then
+            echo "  Connection successful on attempt $attempt."
+            connected=true
+            break
+        fi
+
+        echo "  Attempt $attempt/$max_attempts: Harbor API unreachable (Status: $health_status). Retrying in ${wait_seconds}s..."
+        sleep $wait_seconds
+        ((attempt++))
+    done
+
+    if [ "$connected" = false ]; then
+        echo "  CRITICAL: Harbor API remained unreachable after 30 seconds."
+        return 0
+    fi
+
+    # 2. Loop through the PROJECTS array
+    if [[ -z "${PROJECTS_ARRAY[*]}" ]]; then
+        echo "  No projects defined in the list. Skipping project creation..."
+        return 0
+    fi
+    echo "  Found projects to create"
+    for REGISTRY_PROJECT_NAME in "${PROJECTS_ARRAY[@]}"; do
+        echo "  Processing project: $REGISTRY_PROJECT_NAME"
+
+        local check_cmd="curl -s -u \"$HARBOR_USERNAME:$HARBOR_PASSWORD\" -k \"https://$REGISTRY_COMMON_NAME:$HARBOR_PORT/api/v2.0/projects?name=$REGISTRY_PROJECT_NAME\""
+        
+        # Check if project exists
+        local exists=$(eval "$check_cmd" | grep -o '"name":"'$REGISTRY_PROJECT_NAME'"' | awk -F':' '{print $2}' | tr -d '"')
+
+        if [[ "$exists" == "$REGISTRY_PROJECT_NAME" ]]; then
+            echo "  Result: Project '$REGISTRY_PROJECT_NAME' already exists."
+        else
+            # 3. Create the project            
+            local create_status=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+                -H "Content-Type: application/json" \
+                -u "$HARBOR_USERNAME:$HARBOR_PASSWORD" \
+                -k -d "{ \"project_name\": \"$REGISTRY_PROJECT_NAME\", \"public\": false }" \
+                "https://$REGISTRY_COMMON_NAME:$HARBOR_PORT/api/v2.0/projects")
+
+            # 4. Final Verification
+            local verified=$(eval "$check_cmd" | grep -o '"name":"'$REGISTRY_PROJECT_NAME'"' | awk -F':' '{print $2}' | tr -d '"')
+
+            if [[ "$verified" == "$REGISTRY_PROJECT_NAME" ]]; then
+                echo "  Success: Project '$REGISTRY_PROJECT_NAME' verified (HTTP $create_status)."
+            else
+                echo "  Failure: Project '$REGISTRY_PROJECT_NAME' creation failed (HTTP $create_status)."
+                return 0
+            fi
+        fi
+    done
+    echo "  All project checks and creations completed successfully."
+}
 
 function check_root_privileges() {
   if [[ $EUID != 0 ]]; then
@@ -648,9 +709,6 @@ EOF
 # --- Main Menu function --- #
 
 function help {
-  echo "########################################################################"
-  echo "###                 Ubuntu Devapps Harbor Installer                  ###"
-  echo "########################################################################"
   echo "Usage: $0 [parameter]"
   echo ""
   echo "[Parameters]            | [Description]"
@@ -670,34 +728,29 @@ while [[ $# -gt 0 ]]; do
       ;;
     install-harbor)
       check_root_privileges
-      echo "#######################################"
-      echo "###   Harbor Installation Started   ###"
-      echo "#######################################"
+      echo "###   Harbor Installation Started - $(date)  ###"
       install_harbor
+      echo "###   Harbor Installation Finished - $(date)  ###"
       exit 0
       ;;
     uninstall-harbor)
       check_root_privileges
-      echo "#########################################"
-      echo "###   Harbor Uninstallation Started   ###"
-      echo "#########################################"
+      echo "###   Harbor Uninstallation Started - $(date)   ###"
       uninstall_harbor
       exit 0
       ;;
     offline-prep)
       check_root_privileges
-      echo "##############################################"
-      echo "###   Harbor Offline Preparation Started   ###"
-      echo "##############################################"
+      echo "###   Harbor Offline Preparation Started - $(date)   ###"
       harbor_offline_prep
+      echo "###   Harbor Offline Preparation Finished - $(date)   ###"
       exit 0
       ;;
     update-certificates)
       check_root_privileges
-      echo "########################################"
-      echo "###   Update Certificattes Started   ###"
-      echo "########################################"
+      echo "###   Update Certificattes Started - $(date)  ###"
       update_certificates
+      echo "###   Update Certificates Finished - $(date)  ###"
       exit 0
       ;;
 
