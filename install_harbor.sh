@@ -21,6 +21,12 @@ ORGANIZATION=${ORGANIZATION:-"SELF"}
 REGISTRY_COMMON_NAME=${REGISTRY_COMMON_NAME:-"regsitry.edge.lab"}
 DURATION_DAYS=${DURATION_DAYS:-"3650"}
 
+# Update certificate options
+NEW_CERT_GEN=${NEW_CERT_GEN:-0}
+USER_CERT_CRT=${USER_CERT_CRT:-""}
+USER_CERT_KEY=${USER_CERT_KEY:-""}
+USER_CA_CRT=${USER_CA_CRT:-""}
+
 # --- INTERNAL VARIABLES (do not edit) --- #
 DOCKER_PACKAGES=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
 base_dir=$(pwd)
@@ -77,7 +83,19 @@ function harbor_offline_prep {
 
 
 function update_certificates {
-  echo "soon..."
+  echo "  Stopping Harbor containers..."
+  docker compose -f /opt/harbor/docker-compose.yml down
+  debug_run new_cert_check
+  debug_run harbor_cert_install
+  debug_run gen_harbor_yml
+  echo "  Starting Harbor containers..."
+  docker compose -f /opt/harbor/docker-compose.yml up -d
+  # Display new certificate expiry
+  local cert_expiry
+  cert_expiry=$(openssl x509 -noout -enddate -in "$base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.crt" 2>/dev/null | cut -d= -f2)
+  echo "# --- Certificate Update Completed! --- #"
+  echo "  Certificate expires: $cert_expiry"
+  echo "  Registry: https://$REGISTRY_COMMON_NAME:$HARBOR_PORT"
 }
 
 # --- Install Harbor Functions --- #
@@ -279,15 +297,43 @@ function prepare_offline_package() {
 # --- Update Certificate Functions --- #
 
 function new_cert_check() {
-  echo "soon..."
-  # Develop a function to check for $NEW_CERT_GEN to determine if a new self-signed certificate is to be generated, then do it
-  # If user supplies certs, use openssl to verify and get the common name
-  # stop harbor contaners
-  # copy to docker certs.d with new common name and restart
-  # copy to /usr/local/share/ca-certificates
-  # update-ca-certificates and restart docker
-  # copy to /data/ca_download
-  # bring up containers
+  if [[ "$NEW_CERT_GEN" -eq 1 ]]; then
+    echo "  Generating new self-signed certificate..."
+    cert_gen
+  elif [[ -n "$USER_CERT_CRT" && -n "$USER_CERT_KEY" && -n "$USER_CA_CRT" ]]; then
+    echo "  Using user-supplied certificates..."
+    # Validate files exist
+    for f in "$USER_CERT_CRT" "$USER_CERT_KEY" "$USER_CA_CRT"; do
+      if [[ ! -f "$f" ]]; then
+        echo "  ERROR: Certificate file not found: $f"
+        exit 1
+      fi
+    done
+    # Verify the certificate is readable
+    if ! openssl x509 -noout -subject -in "$USER_CERT_CRT" > /dev/null 2>&1; then
+      echo "  ERROR: Unable to read certificate: $USER_CERT_CRT"
+      exit 1
+    fi
+    # Verify the certificate chains to the provided CA
+    if ! openssl verify -CAfile "$USER_CA_CRT" "$USER_CERT_CRT" > /dev/null 2>&1; then
+      echo "  ERROR: Certificate verification failed. Cert does not chain to provided CA."
+      exit 1
+    fi
+    echo "  Certificate validation passed."
+    # Copy user-supplied files into expected locations
+    mkdir -p "$base_dir/harbor-install-files/certs"
+    cp "$USER_CA_CRT" "$base_dir/harbor-install-files/certs/ca.crt"
+    cp "$USER_CERT_CRT" "$base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.crt"
+    cp "$USER_CERT_KEY" "$base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.key"
+    # Convert .crt to .cert for Docker
+    openssl x509 -inform PEM -in "$USER_CERT_CRT" -out "$base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.cert"
+    echo "  User-supplied certificates installed to $base_dir/harbor-install-files/certs/"
+  else
+    echo "  ERROR: No certificate source specified."
+    echo "  Set NEW_CERT_GEN=1 to generate a new self-signed certificate,"
+    echo "  or provide USER_CERT_CRT, USER_CERT_KEY, and USER_CA_CRT for user-supplied certificates."
+    exit 1
+  fi
 }
 
 # --- Utility Functions --- #
@@ -716,7 +762,7 @@ function help {
   echo "install-harbor          | Installs Harbor regsitry"
   echo "uninstall-harbor        | Uninstalls Harbor registry"
   echo "offline-prep            | Prepares an offline package"
-  echo "update-certificates     | Installs helm chart from variables"
+  echo "update-certificates     | Updates Harbor TLS certificates (self-signed or user-supplied)"
 }
 
 # Start CLI Wrapper
