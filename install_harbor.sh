@@ -364,7 +364,7 @@ create_harbor_projects() {
     while [ $attempt -le $max_attempts ]; do
         local health_status=$(curl -s -o /dev/null -w "%{http_code}" \
             -u "$HARBOR_USERNAME:$HARBOR_PASSWORD" -k \
-            "https://$REGISTRY_COMMON_NAME:$HARBOR_PORT/api/v2.0/projects?page_size=1")
+            "https://$mgmt_ip:$HARBOR_PORT/api/v2.0/projects?page_size=1")
 
         if [[ "$health_status" == "200" ]]; then
             echo "  Connection successful on attempt $attempt."
@@ -391,7 +391,7 @@ create_harbor_projects() {
     for REGISTRY_PROJECT_NAME in "${PROJECTS_ARRAY[@]}"; do
         echo "  Processing project: $REGISTRY_PROJECT_NAME"
 
-        local check_cmd="curl -s -u \"$HARBOR_USERNAME:$HARBOR_PASSWORD\" -k \"https://$REGISTRY_COMMON_NAME:$HARBOR_PORT/api/v2.0/projects?name=$REGISTRY_PROJECT_NAME\""
+        local check_cmd="curl -s -u \"$HARBOR_USERNAME:$HARBOR_PASSWORD\" -k \"https://$mgmt_ip:$HARBOR_PORT/api/v2.0/projects?name=$REGISTRY_PROJECT_NAME\""
         
         # Check if project exists
         local exists=$(eval "$check_cmd" | grep -o '"name":"'$REGISTRY_PROJECT_NAME'"' | awk -F':' '{print $2}' | tr -d '"')
@@ -404,7 +404,7 @@ create_harbor_projects() {
                 -H "Content-Type: application/json" \
                 -u "$HARBOR_USERNAME:$HARBOR_PASSWORD" \
                 -k -d "{ \"project_name\": \"$REGISTRY_PROJECT_NAME\", \"public\": false }" \
-                "https://$REGISTRY_COMMON_NAME:$HARBOR_PORT/api/v2.0/projects")
+                "https://$mgmt_ip:$HARBOR_PORT/api/v2.0/projects")
 
             # 4. Final Verification
             local verified=$(eval "$check_cmd" | grep -o '"name":"'$REGISTRY_PROJECT_NAME'"' | awk -F':' '{print $2}' | tr -d '"')
