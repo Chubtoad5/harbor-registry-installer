@@ -353,13 +353,13 @@ function debug_run() {
 }
 
 create_harbor_projects() {
-    local max_attempts=6
+    local max_attempts=12
     local wait_seconds=5
     local attempt=1
     local connected=false
     read -a PROJECTS_ARRAY <<< "$PROJECTS"
     # 1. Connectivity & Auth Pre-Check with Retry Loop
-    echo "  Starting Harbor API health check (Timeout: 30s)..."
+    echo "  Starting Harbor API health check (Timeout: $(($max_attempts * $wait_seconds))s)..."
     
     while [ $attempt -le $max_attempts ]; do
         local health_status=$(curl -s -o /dev/null -w "%{http_code}" \
