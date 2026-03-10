@@ -92,7 +92,7 @@ function update_certificates {
   docker compose -f /opt/harbor/docker-compose.yml up -d
   # Display new certificate expiry
   local cert_expiry
-  cert_expiry=$(openssl x509 -noout -enddate -in "$base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.crt" 2>/dev/null | cut -d= -f2)
+  cert_expiry=$(openssl x509 -noout -enddate -in "/opt/harbor/certs/$REGISTRY_COMMON_NAME.crt" 2>/dev/null | cut -d= -f2)
   echo "# --- Certificate Update Completed! --- #"
   echo "  Certificate expires: $cert_expiry"
   echo "  Registry: https://$REGISTRY_COMMON_NAME:$HARBOR_PORT"
@@ -181,17 +181,17 @@ EOF
 
 function cert_gen () {
   echo "  Creating self-signed certificate valid for $DURATION_DAYS days..."
-  mkdir -p $base_dir/harbor-install-files/certs
+  mkdir -p /opt/harbor/certs
   # Generate CA key
-  openssl genrsa -out $base_dir/harbor-install-files/certs/ca.key 4096
+  openssl genrsa -out /opt/harbor/certs/ca.key 4096
   # Generate CA certificate
-  openssl req -x509 -new -nodes -sha512 -days $DURATION_DAYS -subj "/C=$COUNTRY/ST=$STATE/L=$LOCATION/O=$ORGANIZATION/CN=$REGISTRY_COMMON_NAME" -key $base_dir/harbor-install-files/certs/ca.key -out $base_dir/harbor-install-files/certs/ca.crt
+  openssl req -x509 -new -nodes -sha512 -days $DURATION_DAYS -subj "/C=$COUNTRY/ST=$STATE/L=$LOCATION/O=$ORGANIZATION/CN=$REGISTRY_COMMON_NAME" -key /opt/harbor/certs/ca.key -out /opt/harbor/certs/ca.crt
   # Generate server key
-  openssl genrsa -out $base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.key 4096
+  openssl genrsa -out /opt/harbor/certs/$REGISTRY_COMMON_NAME.key 4096
   # Generate server CSR
-  openssl req -sha512 -new -subj "/C=$COUNTRY/ST=$STATE/L=$LOCATION/O=$ORGANIZATION/CN=$REGISTRY_COMMON_NAME" -key $base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.key -out $base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.csr
+  openssl req -sha512 -new -subj "/C=$COUNTRY/ST=$STATE/L=$LOCATION/O=$ORGANIZATION/CN=$REGISTRY_COMMON_NAME" -key /opt/harbor/certs/$REGISTRY_COMMON_NAME.key -out /opt/harbor/certs/$REGISTRY_COMMON_NAME.csr
   # Create v3 extension
-  cat > $base_dir/harbor-install-files/certs/v3.ext <<EOF
+  cat > /opt/harbor/certs/v3.ext <<EOF
 authorityKeyIdentifier=keyid,issuer
 basicConstraints=CA:FALSE
 keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
@@ -205,9 +205,9 @@ DNS.2=$current_hostname
 EOF
 
   # Generate signed certificate
-  openssl x509 -req -sha512 -days $DURATION_DAYS -extfile $base_dir/harbor-install-files/certs/v3.ext -CA $base_dir/harbor-install-files/certs/ca.crt -CAkey $base_dir/harbor-install-files/certs/ca.key -CAcreateserial -in $base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.csr -out $base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.crt
+  openssl x509 -req -sha512 -days $DURATION_DAYS -extfile /opt/harbor/certs/v3.ext -CA /opt/harbor/certs/ca.crt -CAkey /opt/harbor/certs/ca.key -CAcreateserial -in /opt/harbor/certs/$REGISTRY_COMMON_NAME.csr -out /opt/harbor/certs/$REGISTRY_COMMON_NAME.crt
   # Convert signed certificate from .crt to .cert
-  openssl x509 -inform PEM -in $base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.crt -out $base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.cert
+  openssl x509 -inform PEM -in /opt/harbor/certs/$REGISTRY_COMMON_NAME.crt -out /opt/harbor/certs/$REGISTRY_COMMON_NAME.cert
   echo "Certificat generation completed..."
 }
 
@@ -216,11 +216,11 @@ function harbor_cert_install () {
   #Copy certs
   mkdir -p "/data/ca_download"
   mkdir -p "/etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT"
-  cp $base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.cert /etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT/
-  cp $base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.key /etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT/
-  cp $base_dir/harbor-install-files/certs/ca.crt /etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT/
-  # cp $base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.crt /usr/local/share/ca-certificates/
-  cp $base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.crt /data/ca_download/ca.crt
+  cp /opt/harbor/certs/$REGISTRY_COMMON_NAME.cert /etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT/
+  cp /opt/harbor/certs/$REGISTRY_COMMON_NAME.key /etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT/
+  cp /opt/harbor/certs/ca.crt /etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT/
+  # cp /opt/harbor/certs/$REGISTRY_COMMON_NAME.crt /usr/local/share/ca-certificates/
+  cp /opt/harbor/certs/$REGISTRY_COMMON_NAME.crt /data/ca_download/ca.crt
 
   # Update certificate store
   # update-ca-certificates
@@ -321,13 +321,13 @@ function new_cert_check() {
     fi
     echo "  Certificate validation passed."
     # Copy user-supplied files into expected locations
-    mkdir -p "$base_dir/harbor-install-files/certs"
-    cp "$USER_CA_CRT" "$base_dir/harbor-install-files/certs/ca.crt"
-    cp "$USER_CERT_CRT" "$base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.crt"
-    cp "$USER_CERT_KEY" "$base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.key"
+    mkdir -p "/opt/harbor/certs"
+    cp "$USER_CA_CRT" "/opt/harbor/certs/ca.crt"
+    cp "$USER_CERT_CRT" "/opt/harbor/certs/$REGISTRY_COMMON_NAME.crt"
+    cp "$USER_CERT_KEY" "/opt/harbor/certs/$REGISTRY_COMMON_NAME.key"
     # Convert .crt to .cert for Docker
-    openssl x509 -inform PEM -in "$USER_CERT_CRT" -out "$base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.cert"
-    echo "  User-supplied certificates installed to $base_dir/harbor-install-files/certs/"
+    openssl x509 -inform PEM -in "$USER_CERT_CRT" -out "/opt/harbor/certs/$REGISTRY_COMMON_NAME.cert"
+    echo "  User-supplied certificates installed to /opt/harbor/certs/"
   else
     echo "  ERROR: No certificate source specified."
     echo "  Set NEW_CERT_GEN=1 to generate a new self-signed certificate,"
@@ -448,8 +448,8 @@ https:
   # https port for harbor, default is 443
   port: $HARBOR_PORT
   # The path of cert and key files for nginx
-  certificate: "$base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.crt"
-  private_key: "$base_dir/harbor-install-files/certs/$REGISTRY_COMMON_NAME.key"
+  certificate: "/opt/harbor/certs/$REGISTRY_COMMON_NAME.crt"
+  private_key: "/opt/harbor/certs/$REGISTRY_COMMON_NAME.key"
   # enable strong ssl ciphers (default: false)
   # strong_ssl_ciphers: false
 

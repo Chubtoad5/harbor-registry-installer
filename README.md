@@ -159,7 +159,16 @@ Clients pulling images must be able to resolve `REGISTRY_COMMON_NAME`. If DNS is
 
 ### Trusting the Self-Signed CA on Clients
 
-Docker clients that push/pull images from this registry need the CA certificate. After installation, the CA is available for download at `/data/ca_download/ca.crt` on the Harbor host. On each Docker client:
+Docker clients that push/pull images from this registry need the CA certificate. After installation, the CA is available for download at `/data/ca_download/ca.crt` on the Harbor host.  
+
+Alternatively, you can download the CA certificate from the Harbor web UI from Prjects > **your project** > REGISTRY CERTIFICATE link.  
+
+Download using curl
+```
+curl -k https://<REGISTRY_COMMON_NAME>:<PORT>/api/v2.0/systeminfo/getcert -o ca.crt
+```
+
+On each Docker client:
 
 ```bash
 # Copy the CA to the client
