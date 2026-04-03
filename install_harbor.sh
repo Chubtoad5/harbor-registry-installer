@@ -13,7 +13,7 @@ HARBOR_PASSWORD=${HARBOR_PASSWORD:-Harbor12345}
 DOCKER_BRIDGE_CIDR=${DOCKER_BRIDGE_CIDR:-"172.30.0.1/16"}
 PROJECTS=${PROJECTS:-""}
 
-# Self-signed certificate 
+# Self-signed certificate
 COUNTRY=${COUNTRY:-"US"}
 STATE=${STATE:-"MA"}
 LOCATION=${LOCATION:-"BOSTON"}
@@ -67,7 +67,7 @@ function uninstall_harbor {
   rm -rf /opt/harbor
   rm -rf /data
   rm -f /etc/systemd/system/harbor-docker.service
-  rm -rf "/etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT" 
+  rm -rf "/etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT"
   echo "  Uninstallation completed..."
 }
 
@@ -208,19 +208,21 @@ EOF
   openssl x509 -req -sha512 -days $DURATION_DAYS -extfile /opt/harbor/certs/v3.ext -CA /opt/harbor/certs/ca.crt -CAkey /opt/harbor/certs/ca.key -CAcreateserial -in /opt/harbor/certs/$REGISTRY_COMMON_NAME.csr -out /opt/harbor/certs/$REGISTRY_COMMON_NAME.crt
   # Convert signed certificate from .crt to .cert
   openssl x509 -inform PEM -in /opt/harbor/certs/$REGISTRY_COMMON_NAME.crt -out /opt/harbor/certs/$REGISTRY_COMMON_NAME.cert
+  # Create fullchain (server cert + CA cert) so nginx sends the complete chain during TLS handshake
+  cat /opt/harbor/certs/$REGISTRY_COMMON_NAME.crt /opt/harbor/certs/ca.crt > /opt/harbor/certs/$REGISTRY_COMMON_NAME-fullchain.crt
   echo "Certificat generation completed..."
 }
 
 function harbor_cert_install () {
-    
+
   #Copy certs
   mkdir -p "/data/ca_download"
   mkdir -p "/etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT"
   cp /opt/harbor/certs/$REGISTRY_COMMON_NAME.cert /etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT/
   cp /opt/harbor/certs/$REGISTRY_COMMON_NAME.key /etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT/
   cp /opt/harbor/certs/ca.crt /etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT/
-  # cp /opt/harbor/certs/$REGISTRY_COMMON_NAME.crt /usr/local/share/ca-certificates/
-  cp /opt/harbor/certs/$REGISTRY_COMMON_NAME.crt /data/ca_download/ca.crt
+  # Copy the actual CA certificate (not the server cert) to ca_download for external consumers
+  cp /opt/harbor/certs/ca.crt /data/ca_download/ca.crt
 
   # Update certificate store
   # update-ca-certificates
@@ -327,6 +329,8 @@ function new_cert_check() {
     cp "$USER_CERT_KEY" "/opt/harbor/certs/$REGISTRY_COMMON_NAME.key"
     # Convert .crt to .cert for Docker
     openssl x509 -inform PEM -in "$USER_CERT_CRT" -out "/opt/harbor/certs/$REGISTRY_COMMON_NAME.cert"
+    # Create fullchain (server cert + CA cert) so nginx sends the complete chain during TLS handshake
+    cat "/opt/harbor/certs/$REGISTRY_COMMON_NAME.crt" "/opt/harbor/certs/ca.crt" > "/opt/harbor/certs/$REGISTRY_COMMON_NAME-fullchain.crt"
     echo "  User-supplied certificates installed to /opt/harbor/certs/"
   else
     echo "  ERROR: No certificate source specified."
@@ -360,7 +364,7 @@ create_harbor_projects() {
     read -a PROJECTS_ARRAY <<< "$PROJECTS"
     # 1. Connectivity & Auth Pre-Check with Retry Loop
     echo "  Starting Harbor API health check (Timeout: $(($max_attempts * $wait_seconds))s)..."
-    
+
     while [ $attempt -le $max_attempts ]; do
         local health_status=$(curl -s -o /dev/null -w "%{http_code}" \
             -u "$HARBOR_USERNAME:$HARBOR_PASSWORD" -k \
@@ -392,14 +396,14 @@ create_harbor_projects() {
         echo "  Processing project: $REGISTRY_PROJECT_NAME"
 
         local check_cmd="curl -s -u \"$HARBOR_USERNAME:$HARBOR_PASSWORD\" -k \"https://$mgmt_ip:$HARBOR_PORT/api/v2.0/projects?name=$REGISTRY_PROJECT_NAME\""
-        
+
         # Check if project exists
         local exists=$(eval "$check_cmd" | grep -o '"name":"'$REGISTRY_PROJECT_NAME'"' | awk -F':' '{print $2}' | tr -d '"')
 
         if [[ "$exists" == "$REGISTRY_PROJECT_NAME" ]]; then
             echo "  Result: Project '$REGISTRY_PROJECT_NAME' already exists."
         else
-            # 3. Create the project            
+            # 3. Create the project
             local create_status=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
                 -H "Content-Type: application/json" \
                 -u "$HARBOR_USERNAME:$HARBOR_PASSWORD" \
@@ -448,7 +452,7 @@ https:
   # https port for harbor, default is 443
   port: $HARBOR_PORT
   # The path of cert and key files for nginx
-  certificate: "/opt/harbor/certs/$REGISTRY_COMMON_NAME.crt"
+  certificate: "/opt/harbor/certs/$REGISTRY_COMMON_NAME-fullchain.crt"
   private_key: "/opt/harbor/certs/$REGISTRY_COMMON_NAME.key"
   # enable strong ssl ciphers (default: false)
   # strong_ssl_ciphers: false
