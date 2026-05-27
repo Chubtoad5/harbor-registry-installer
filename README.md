@@ -2,6 +2,24 @@
 
 A single-script installer for deploying [Harbor](https://goharbor.io/) container registry with Docker Compose, self-signed TLS certificates, and systemd service management. Supports online and air-gapped installations across multiple Linux distributions.
 
+---
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Features](#features)
+- [Supported Operating Systems](#supported-operating-systems)
+- [Prerequisites](#prerequisites)
+- [Usage](#usage)
+- [Environment Variables](#environment-variables)
+- [Examples](#examples)
+- [Special Considerations](#special-considerations)
+- [File Layout](#file-layout)
+- [Appendix A: Manual Installation Steps](#appendix-a-manual-installation-steps)
+- [Appendix B: Air-Gapped Installation](#appendix-b-air-gapped-installation)
+
+---
+
 ## Quick Start
 
 New here? This stands up a private Harbor container registry — Docker, a self-signed TLS certificate,
