@@ -2,6 +2,41 @@
 
 A single-script installer for deploying [Harbor](https://goharbor.io/) container registry with Docker Compose, self-signed TLS certificates, and systemd service management. Supports online and air-gapped installations across multiple Linux distributions.
 
+## Quick Start
+
+New here? This stands up a private Harbor container registry — Docker, a self-signed TLS certificate,
+and a systemd service so it survives reboots — in a single command.
+
+**Prerequisites**
+- A Linux host with `root` / `sudo` (Ubuntu/Debian, RHEL/Rocky/AlmaLinux/CentOS, or Fedora)
+- ~4 GB RAM, 40 GB+ disk, and `curl` + `openssl` installed
+- Free TCP port **443** (override with `HARBOR_PORT`)
+- A hostname for the registry — set it with `REGISTRY_COMMON_NAME`. **The built-in default has a typo,
+  so always pass your own.**
+
+**1. Get the script**
+```bash
+git clone https://github.com/Chubtoad5/harbor-registry-installer.git
+cd harbor-registry-installer
+chmod +x install_harbor.sh
+```
+
+**2. Install, giving Harbor its hostname**
+```bash
+sudo REGISTRY_COMMON_NAME="registry.example.com" bash install_harbor.sh install-harbor
+```
+
+**3. Reach it**
+- Open `https://registry.example.com` and log in as `admin` / `Harbor12345` — **change this on first
+  login**.
+- Make sure clients can resolve that hostname: add a DNS A record, or an `/etc/hosts` entry pointing it
+  at the host's IP.
+- Pushing/pulling from another machine? That client must trust the self-signed CA — see
+  [Trusting the Self-Signed CA on Clients](#trusting-the-self-signed-ca-on-clients).
+
+That's the happy path. For a custom port, pre-created projects, your own certificates, or an
+air-gapped install, read on.
+
 ## Features
 
 - Automated Docker CE installation (online or offline)
@@ -56,7 +91,7 @@ All variables have defaults and can be overridden by exporting them before runni
 | Variable | Default | Description |
 |---|---|---|
 | `DEBUG` | `1` | Enable verbose debug output (`1` = on, `0` = off) |
-| `HARBOR_VERSION` | `2.14.1` | Harbor release version to install |
+| `HARBOR_VERSION` | `2.15.0` | Harbor release version to install |
 | `HARBOR_PORT` | `443` | HTTPS port for the registry |
 | `HARBOR_USERNAME` | `admin` | Admin username |
 | `HARBOR_PASSWORD` | `Harbor12345` | Admin password (change after first login) |
@@ -318,7 +353,7 @@ systemctl restart docker
 ### Step 4: Download and Extract Harbor
 
 ```bash
-HARBOR_VERSION="2.14.1"
+HARBOR_VERSION="2.15.0"
 curl -fsSLO https://github.com/goharbor/harbor/releases/download/v${HARBOR_VERSION}/harbor-offline-installer-v${HARBOR_VERSION}.tgz
 tar xzvf harbor-offline-installer-v${HARBOR_VERSION}.tgz -C /opt/
 ```
