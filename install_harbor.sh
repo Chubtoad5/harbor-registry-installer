@@ -310,10 +310,11 @@ container images, each carrying its own license inside the image, e.g.:
   Notary ................... Apache-2.0
   nginx (proxy) ............ BSD-2-Clause  https://nginx.org/
   PostgreSQL ............... PostgreSQL License
-  Redis .................... VERSION-DEPENDENT: older releases BSD-3-Clause; newer Redis
-                            may be RSALv2 / SSPL (source-available, NOT OSI-approved) with
-                            its own redistribution conditions. VERIFY the Redis version in
-                            your Harbor $HARBOR_VERSION offline bundle before redistributing.
+  Redis (goharbor/redis-photon) BSD-3-Clause for Harbor 2.15.x: it ships Redis 7.2,
+                            which is BSD-3-Clause (permissive). NOTE: Redis 7.4+ moved to
+                            RSALv2/SSPL (source-available, NOT OSI) and 8.0+ added AGPLv3 —
+                            re-verify if you bump HARBOR_VERSION to a release whose
+                            redis-photon ships Redis 7.4 or newer.
 
 Docker CE packages installed on the host are Apache-2.0. The installer script is
 Apache-2.0 (Chubtoad5). No GPL/AGPL components are bundled, so no written source offer
