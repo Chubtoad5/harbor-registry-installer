@@ -490,3 +490,17 @@ The connected host must be running the **same OS and version** as the target.
 - The offline package is **OS-version specific**. A package built on Ubuntu 22.04 will not work on Ubuntu 24.04 or RHEL.
 - Harbor's Trivy vulnerability scanner requires database updates from the internet. In air-gapped mode, set `skip_update: true` and `offline_scan: true` in `harbor.yml` under the `trivy:` section, or manually supply the Trivy DB.
 - After installation, distribute the CA certificate (`/data/ca_download/ca.crt`) to all Docker clients on the local network that need to push or pull images.
+
+---
+
+## Upstream / Credits
+
+This project automates the following open-source software; all credit to their authors. See [NOTICE](NOTICE) for
+the full third-party list + licenses.
+
+- Harbor (Apache-2.0), Docker (Apache-2.0)
+- The Harbor offline bundle ships several images: registry / Trivy / Notary (Apache-2.0), nginx (BSD-2-Clause), PostgreSQL (PostgreSQL License), and **Redis (license is version-dependent — verify; newer Redis may be RSALv2/SSPL, not OSI-open)**
+
+## License
+
+Licensed under the **Apache License 2.0** — see [LICENSE](LICENSE) and [NOTICE](NOTICE).

@@ -1,0 +1,27 @@
+Harbor Registry Installer
+Copyright (C) 2026 Chubtoad5
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This is an original automation script. It installs Harbor and orchestrates the
+following third-party open-source software, each under its own license (all credit
+to their respective authors):
+
+  Harbor                  Apache-2.0     https://github.com/goharbor/harbor
+  Docker / Moby           Apache-2.0     https://github.com/moby/moby
+
+The Harbor offline installer bundle that this script downloads and (re)distributes
+contains multiple upstream container images, each under its own license, e.g.:
+
+  registry / distribution Apache-2.0
+  Trivy                   Apache-2.0     https://github.com/aquasecurity/trivy
+  Notary                  Apache-2.0
+  nginx (proxy)           BSD-2-Clause   https://nginx.org/
+  PostgreSQL              PostgreSQL License
+  Redis                   VERSION-DEPENDENT — older releases BSD-3-Clause; newer
+                          Redis may be RSALv2 / SSPL (source-available, NOT OSI-open).
+                          VERIFY the Redis version shipped by your pinned Harbor
+                          release before redistributing the bundle.
+
+When redistributing the Harbor offline bundle, retain each image's copyright/
+license notices and any bundled NOTICE files.
