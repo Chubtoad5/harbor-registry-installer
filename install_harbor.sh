@@ -289,11 +289,45 @@ function download_harbor_offline_package() {
   curl -fsSLo $base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz https://github.com/goharbor/harbor/releases/download/v$HARBOR_VERSION/harbor-offline-installer-v$HARBOR_VERSION.tgz
 }
 
+function generate_bundle_licenses() {
+  # Write a LICENSES/ third-party manifest into the offline archive. Harbor and its
+  # components are Apache-2.0; the offline tgz ships several images under their own
+  # licenses (notably Redis, whose license is version-dependent). No GPL/AGPL is
+  # bundled, so no written source offer is required.
+  local dir="$base_dir/LICENSES"
+  rm -rf "$dir"; mkdir -p "$dir"
+  cat > "$dir/THIRD_PARTY_NOTICES.txt" <<EOF
+Third-party components redistributed in this Harbor air-gap bundle
+Generated: $(date)
+Harbor version: $HARBOR_VERSION
+
+Harbor and its components are Apache-2.0 (https://github.com/goharbor/harbor). The
+offline installer (harbor-offline-installer-v$HARBOR_VERSION.tgz) ships multiple upstream
+container images, each carrying its own license inside the image, e.g.:
+
+  registry / distribution ... Apache-2.0
+  Trivy ..................... Apache-2.0   https://github.com/aquasecurity/trivy
+  Notary ................... Apache-2.0
+  nginx (proxy) ............ BSD-2-Clause  https://nginx.org/
+  PostgreSQL ............... PostgreSQL License
+  Redis .................... VERSION-DEPENDENT: older releases BSD-3-Clause; newer Redis
+                            may be RSALv2 / SSPL (source-available, NOT OSI-approved) with
+                            its own redistribution conditions. VERIFY the Redis version in
+                            your Harbor $HARBOR_VERSION offline bundle before redistributing.
+
+Docker CE packages installed on the host are Apache-2.0. The installer script is
+Apache-2.0 (Chubtoad5). No GPL/AGPL components are bundled, so no written source offer
+is required; each image's own license/notice ships inside the image.
+EOF
+  echo "  Wrote LICENSES/ (third-party manifest)."
+}
+
 function prepare_offline_package() {
   echo "  Generating offline archive..."
   cd $base_dir
   echo "Offline package generated on $(date) for $os_release_version and Harbor version $HARBOR_VERSION" | tee $base_dir/harbor-install-files/VERSION.txt
-  tar czvf harbor-offline-package.tar.gz harbor-install-files/ install_harbor.sh
+  generate_bundle_licenses
+  tar czvf harbor-offline-package.tar.gz harbor-install-files/ install_harbor.sh LICENSES
 }
 
 # --- Update Certificate Functions --- #
