@@ -22,6 +22,9 @@ HARBOR_PASSWORD=${HARBOR_PASSWORD:-Harbor12345}
 HARBOR_DB_PASSWORD=${HARBOR_DB_PASSWORD:-root123}
 DOCKER_BRIDGE_CIDR=${DOCKER_BRIDGE_CIDR:-"172.30.0.1/16"}
 PROJECTS=${PROJECTS:-""}
+# uninstall-harbor: 'true' removes /data entirely; default removes only the
+# Harbor-created subpaths (safe on shared /data mounts)
+PURGE_DATA=${PURGE_DATA:-false}
 
 # Self-signed certificate
 COUNTRY=${COUNTRY:-"US"}
@@ -94,15 +97,78 @@ function uninstall_harbor {
   load_install_env
   echo "  Uninstalling Harbor registry"
   echo "  Removing containers..."
-  docker compose -f /opt/harbor/docker-compose.yml down
-  systemctl disable --now harbor-docker.service
+  if [[ -f /etc/systemd/system/harbor-docker.service ]]; then
+    systemctl disable --now harbor-docker.service 2>/dev/null || true
+  fi
+  if [[ -f /opt/harbor/docker-compose.yml ]] && command -v docker &> /dev/null; then
+    docker compose -f /opt/harbor/docker-compose.yml down 2>/dev/null || true
+  fi
+  # Remove the goharbor images loaded by the Harbor offline installer
+  if command -v docker &> /dev/null; then
+    local goharbor_images=()
+    readarray -t goharbor_images < <(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep '^goharbor/' || true)
+    if [[ ${#goharbor_images[@]} -gt 0 ]]; then
+      echo "  Removing ${#goharbor_images[@]} goharbor image(s)..."
+      docker rmi -f "${goharbor_images[@]}" > /dev/null 2>&1 || true
+    fi
+  fi
+  echo "  Removing docker client trust entries..."
+  rm -rf "$docker_certs_root/$REGISTRY_COMMON_NAME:$HARBOR_PORT"
+  sweep_matching_certsd_dirs
   echo "  Removing data files..."
-  rm -rf $base_dir/harbor-install-files
-  rm -rf /opt/harbor
-  rm -rf /data
+  # Remove the install files where they were recorded at install time (works
+  # from any cwd), plus a cwd copy when both exist
+  if [[ -n "$recorded_install_files_dir" && -d "$recorded_install_files_dir" ]]; then
+    rm -rf "$recorded_install_files_dir"
+  fi
+  rm -rf "$base_dir/harbor-install-files"
+  remove_harbor_data
+  rm -rf /var/log/harbor
   rm -f /etc/systemd/system/harbor-docker.service
-  rm -rf "/etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT"
+  systemctl daemon-reload
+  systemctl reset-failed harbor-docker.service 2>/dev/null || true
+  # Remove the docker group membership only when this installer added it
+  if [[ "$recorded_docker_group_added" == "1" && -n "$recorded_install_user" ]]; then
+    if id -nG "$recorded_install_user" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+      gpasswd -d "$recorded_install_user" docker > /dev/null 2>&1 || true
+      echo "  Removed $recorded_install_user from the docker group (membership was added by the installer)"
+    fi
+  fi
+  rm -rf /opt/harbor
   echo "  Uninstallation completed..."
+}
+
+function sweep_matching_certsd_dirs () {
+  # Fallback for installs made before .install-env existed: remove exactly the
+  # certs.d entries whose ca.crt byte-matches the CA this installer created
+  local installed_ca="$certs_dir/ca.crt"
+  [[ -f "$installed_ca" ]] || return 0
+  local dir
+  for dir in "$docker_certs_root"/*/; do
+    [[ -d "$dir" ]] || continue
+    [[ -f "$dir/ca.crt" ]] || continue
+    if cmp -s "$dir/ca.crt" "$installed_ca"; then
+      rm -rf "$dir"
+      echo "  Removed ${dir%/} (its ca.crt matches the installed Harbor CA)"
+    fi
+  done
+}
+
+function remove_harbor_data () {
+  # Never remove $data_dir wholesale by default - /data can be a shared mount
+  # holding non-Harbor data. PURGE_DATA=true opts in to full removal.
+  if [[ "$PURGE_DATA" == "true" || "$PURGE_DATA" == "1" ]]; then
+    echo "  PURGE_DATA=$PURGE_DATA - removing $data_dir entirely"
+    rm -rf "$data_dir"
+    return 0
+  fi
+  local harbor_subdirs=(ca_download database job_logs redis registry secret trivy-adapter chart_storage)
+  local sub
+  for sub in "${harbor_subdirs[@]}"; do
+    [[ -e "$data_dir/$sub" ]] && rm -rf "${data_dir:?}/$sub"
+  done
+  rmdir "$data_dir" 2>/dev/null || true
+  echo "  Removed Harbor-created paths under $data_dir (set PURGE_DATA=true to remove $data_dir entirely)"
 }
 
 function harbor_offline_prep {
