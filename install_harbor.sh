@@ -42,7 +42,9 @@ DOCKER_PACKAGES=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin dock
 base_dir=$(pwd)
 os_id=""
 os_release_version=""
-mgmt_ip=$(hostname -I | awk '{print $1}')
+# First 'hostname -I' token by default; set MGMT_IP explicitly on multi-homed
+# hosts to control which IP lands in the certificate SAN and the printed URLs
+mgmt_ip=${MGMT_IP:-$(hostname -I | awk '{print $1}')}
 mgmt_if=$(ip a |grep "$(hostname -I |awk '{print $1}')" | awk '{print $NF}')
 user_name=${SUDO_USER:-$(whoami)}
 current_hostname=$(hostname)
@@ -115,17 +117,40 @@ function harbor_offline_prep {
 
 
 function update_certificates {
+  if [[ ! -f /opt/harbor/docker-compose.yml || ! -x /opt/harbor/prepare ]]; then
+    echo "  ERROR: No Harbor installation found in /opt/harbor. Run install-harbor first."
+    exit 1
+  fi
   load_install_env
+  preserve_existing_yml_passwords
   echo "  Stopping Harbor containers..."
-  docker compose -f /opt/harbor/docker-compose.yml down
-  debug_run new_cert_check
-  debug_run harbor_cert_install
-  debug_run gen_harbor_yml
+  if [[ -f /etc/systemd/system/harbor-docker.service ]]; then
+    systemctl stop harbor-docker.service || true
+  fi
+  docker compose -f /opt/harbor/docker-compose.yml down || true
+  run_step new_cert_check
+  run_step harbor_cert_install
+  run_step gen_harbor_yml
+  # Harbor's nginx config is rendered from harbor.yml by prepare - without this
+  # the stack keeps serving the old certificate
+  echo "  Running Harbor prepare to apply the new certificates..."
+  run_step run_harbor_prepare
   echo "  Starting Harbor containers..."
-  docker compose -f /opt/harbor/docker-compose.yml up -d
+  if [[ -f /etc/systemd/system/harbor-docker.service ]]; then
+    if ! systemctl start harbor-docker.service; then
+      echo "ERROR: Failed to start harbor-docker.service after the certificate update."
+      exit 1
+    fi
+  else
+    if ! docker compose -f /opt/harbor/docker-compose.yml up -d; then
+      echo "ERROR: Failed to start the Harbor stack after the certificate update."
+      exit 1
+    fi
+  fi
+  run_step verify_served_certificate
   # Display new certificate expiry
   local cert_expiry
-  cert_expiry=$(openssl x509 -noout -enddate -in "/opt/harbor/certs/$REGISTRY_COMMON_NAME.crt" 2>/dev/null | cut -d= -f2)
+  cert_expiry=$(openssl x509 -noout -enddate -in "$certs_dir/$REGISTRY_COMMON_NAME.crt" 2>/dev/null | cut -d= -f2)
   echo "# --- Certificate Update Completed! --- #"
   echo "  Certificate expires: $cert_expiry"
   echo "  Registry: https://$REGISTRY_COMMON_NAME:$HARBOR_PORT"
@@ -366,19 +391,35 @@ EOF
   fi
 }
 
-function cert_gen () {
-  echo "  Creating self-signed certificate valid for $DURATION_DAYS days..."
-  mkdir -p /opt/harbor/certs
+function ca_gen () {
+  # Generate the CA pair only when one does not already exist. Reusing the CA on
+  # re-install and cert renewal keeps every remote client's trust intact.
+  if [[ -s "$certs_dir/ca.crt" && -s "$certs_dir/ca.key" ]]; then
+    echo "  Existing CA found in $certs_dir - reusing it (remote client trust is preserved)"
+    return 0
+  fi
+  if [[ -s "$certs_dir/ca.crt" || -s "$certs_dir/ca.key" ]]; then
+    echo "  ERROR: Incomplete CA in $certs_dir (one of ca.crt/ca.key is missing or empty)."
+    echo "  Restore the missing file, or remove both to generate a fresh CA (remote clients must then re-trust it)."
+    return 1
+  fi
+  echo "  Generating a new certificate authority (valid $DURATION_DAYS days)..."
+  mkdir -p "$certs_dir"
   # Generate CA key
-  openssl genrsa -out /opt/harbor/certs/ca.key 4096
+  openssl genrsa -out "$certs_dir/ca.key" 4096 || return 1
   # Generate CA certificate
-  openssl req -x509 -new -nodes -sha512 -days $DURATION_DAYS -subj "/C=$COUNTRY/ST=$STATE/L=$LOCATION/O=$ORGANIZATION/CN=$REGISTRY_COMMON_NAME" -key /opt/harbor/certs/ca.key -out /opt/harbor/certs/ca.crt
+  openssl req -x509 -new -nodes -sha512 -days "$DURATION_DAYS" -subj "/C=$COUNTRY/ST=$STATE/L=$LOCATION/O=$ORGANIZATION/CN=$REGISTRY_COMMON_NAME" -key "$certs_dir/ca.key" -out "$certs_dir/ca.crt" || return 1
+}
+
+function server_cert_gen () {
+  echo "  Creating server certificate valid for $DURATION_DAYS days (signed by the CA in $certs_dir)..."
+  mkdir -p "$certs_dir"
   # Generate server key
-  openssl genrsa -out /opt/harbor/certs/$REGISTRY_COMMON_NAME.key 4096
+  openssl genrsa -out "$certs_dir/$REGISTRY_COMMON_NAME.key" 4096 || return 1
   # Generate server CSR
-  openssl req -sha512 -new -subj "/C=$COUNTRY/ST=$STATE/L=$LOCATION/O=$ORGANIZATION/CN=$REGISTRY_COMMON_NAME" -key /opt/harbor/certs/$REGISTRY_COMMON_NAME.key -out /opt/harbor/certs/$REGISTRY_COMMON_NAME.csr
+  openssl req -sha512 -new -subj "/C=$COUNTRY/ST=$STATE/L=$LOCATION/O=$ORGANIZATION/CN=$REGISTRY_COMMON_NAME" -key "$certs_dir/$REGISTRY_COMMON_NAME.key" -out "$certs_dir/$REGISTRY_COMMON_NAME.csr" || return 1
   # Create v3 extension
-  cat > /opt/harbor/certs/v3.ext <<EOF
+  cat > "$certs_dir/v3.ext" <<EOF
 authorityKeyIdentifier=keyid,issuer
 basicConstraints=CA:FALSE
 keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
@@ -392,30 +433,39 @@ DNS.2=$current_hostname
 EOF
 
   # Generate signed certificate
-  openssl x509 -req -sha512 -days $DURATION_DAYS -extfile /opt/harbor/certs/v3.ext -CA /opt/harbor/certs/ca.crt -CAkey /opt/harbor/certs/ca.key -CAcreateserial -in /opt/harbor/certs/$REGISTRY_COMMON_NAME.csr -out /opt/harbor/certs/$REGISTRY_COMMON_NAME.crt
+  openssl x509 -req -sha512 -days "$DURATION_DAYS" -extfile "$certs_dir/v3.ext" -CA "$certs_dir/ca.crt" -CAkey "$certs_dir/ca.key" -CAcreateserial -in "$certs_dir/$REGISTRY_COMMON_NAME.csr" -out "$certs_dir/$REGISTRY_COMMON_NAME.crt" || return 1
   # Convert signed certificate from .crt to .cert
-  openssl x509 -inform PEM -in /opt/harbor/certs/$REGISTRY_COMMON_NAME.crt -out /opt/harbor/certs/$REGISTRY_COMMON_NAME.cert
+  openssl x509 -inform PEM -in "$certs_dir/$REGISTRY_COMMON_NAME.crt" -out "$certs_dir/$REGISTRY_COMMON_NAME.cert" || return 1
   # Create fullchain (server cert + CA cert) so nginx sends the complete chain during TLS handshake
-  cat /opt/harbor/certs/$REGISTRY_COMMON_NAME.crt /opt/harbor/certs/ca.crt > /opt/harbor/certs/$REGISTRY_COMMON_NAME-fullchain.crt
-  echo "Certificat generation completed..."
+  cat "$certs_dir/$REGISTRY_COMMON_NAME.crt" "$certs_dir/ca.crt" > "$certs_dir/$REGISTRY_COMMON_NAME-fullchain.crt"
+  echo "Certificate generation completed..."
+}
+
+function cert_gen () {
+  ca_gen || return 1
+  server_cert_gen || return 1
 }
 
 function harbor_cert_install () {
-
-  #Copy certs
-  mkdir -p "/data/ca_download"
-  mkdir -p "/etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT"
-  cp /opt/harbor/certs/$REGISTRY_COMMON_NAME.cert /etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT/
-  cp /opt/harbor/certs/$REGISTRY_COMMON_NAME.key /etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT/
-  cp /opt/harbor/certs/ca.crt /etc/docker/certs.d/$REGISTRY_COMMON_NAME:$HARBOR_PORT/
+  # Copy certs - only client trust material belongs in certs.d, never the
+  # private key
+  mkdir -p "$data_dir/ca_download"
+  mkdir -p "$docker_certs_root/$REGISTRY_COMMON_NAME:$HARBOR_PORT"
+  cp "$certs_dir/$REGISTRY_COMMON_NAME.cert" "$docker_certs_root/$REGISTRY_COMMON_NAME:$HARBOR_PORT/" || return 1
+  cp "$certs_dir/ca.crt" "$docker_certs_root/$REGISTRY_COMMON_NAME:$HARBOR_PORT/" || return 1
+  # Remove private keys leaked into certs.d by pre-fix installs
+  rm -f "$docker_certs_root/$REGISTRY_COMMON_NAME:$HARBOR_PORT"/*.key
   # Copy the actual CA certificate (not the server cert) to ca_download for external consumers
-  cp /opt/harbor/certs/ca.crt /data/ca_download/ca.crt
+  cp "$certs_dir/ca.crt" "$data_dir/ca_download/ca.crt" || return 1
 
-  # Update certificate store
-  # update-ca-certificates
+  # Record the CA fingerprint so uninstall can identify this install's trust entries
+  set_install_env_value CA_FINGERPRINT "$(openssl x509 -noout -fingerprint -sha256 -in "$certs_dir/ca.crt" 2>/dev/null | cut -d= -f2)"
 
   # Restart docker
-  systemctl restart docker
+  if ! systemctl restart docker; then
+    echo "Error: Failed to restart docker after installing certificates."
+    return 1
+  fi
 }
 
 function run_harbor_installer() {
@@ -548,44 +598,90 @@ function prepare_offline_package() {
 
 function new_cert_check() {
   if [[ "$NEW_CERT_GEN" -eq 1 ]]; then
-    echo "  Generating new self-signed certificate..."
-    cert_gen
+    echo "  Generating new self-signed certificate (existing CA is reused when present)..."
+    cert_gen || return 1
   elif [[ -n "$USER_CERT_CRT" && -n "$USER_CERT_KEY" && -n "$USER_CA_CRT" ]]; then
     echo "  Using user-supplied certificates..."
     # Validate files exist
     for f in "$USER_CERT_CRT" "$USER_CERT_KEY" "$USER_CA_CRT"; do
       if [[ ! -f "$f" ]]; then
         echo "  ERROR: Certificate file not found: $f"
-        exit 1
+        return 1
       fi
     done
     # Verify the certificate is readable
     if ! openssl x509 -noout -subject -in "$USER_CERT_CRT" > /dev/null 2>&1; then
       echo "  ERROR: Unable to read certificate: $USER_CERT_CRT"
-      exit 1
+      return 1
     fi
     # Verify the certificate chains to the provided CA
     if ! openssl verify -CAfile "$USER_CA_CRT" "$USER_CERT_CRT" > /dev/null 2>&1; then
       echo "  ERROR: Certificate verification failed. Cert does not chain to provided CA."
-      exit 1
+      return 1
     fi
     echo "  Certificate validation passed."
     # Copy user-supplied files into expected locations
-    mkdir -p "/opt/harbor/certs"
-    cp "$USER_CA_CRT" "/opt/harbor/certs/ca.crt"
-    cp "$USER_CERT_CRT" "/opt/harbor/certs/$REGISTRY_COMMON_NAME.crt"
-    cp "$USER_CERT_KEY" "/opt/harbor/certs/$REGISTRY_COMMON_NAME.key"
+    mkdir -p "$certs_dir"
+    cp "$USER_CA_CRT" "$certs_dir/ca.crt"
+    cp "$USER_CERT_CRT" "$certs_dir/$REGISTRY_COMMON_NAME.crt"
+    cp "$USER_CERT_KEY" "$certs_dir/$REGISTRY_COMMON_NAME.key"
     # Convert .crt to .cert for Docker
-    openssl x509 -inform PEM -in "$USER_CERT_CRT" -out "/opt/harbor/certs/$REGISTRY_COMMON_NAME.cert"
+    openssl x509 -inform PEM -in "$USER_CERT_CRT" -out "$certs_dir/$REGISTRY_COMMON_NAME.cert"
     # Create fullchain (server cert + CA cert) so nginx sends the complete chain during TLS handshake
-    cat "/opt/harbor/certs/$REGISTRY_COMMON_NAME.crt" "/opt/harbor/certs/ca.crt" > "/opt/harbor/certs/$REGISTRY_COMMON_NAME-fullchain.crt"
-    echo "  User-supplied certificates installed to /opt/harbor/certs/"
+    cat "$certs_dir/$REGISTRY_COMMON_NAME.crt" "$certs_dir/ca.crt" > "$certs_dir/$REGISTRY_COMMON_NAME-fullchain.crt"
+    echo "  User-supplied certificates installed to $certs_dir/"
   else
     echo "  ERROR: No certificate source specified."
     echo "  Set NEW_CERT_GEN=1 to generate a new self-signed certificate,"
     echo "  or provide USER_CERT_CRT, USER_CERT_KEY, and USER_CA_CRT for user-supplied certificates."
-    exit 1
+    return 1
   fi
+}
+
+function preserve_existing_yml_passwords () {
+  # update-certificates regenerates harbor.yml - keep the passwords the running
+  # install uses unless the caller explicitly re-passed them
+  [[ -f /opt/harbor/harbor.yml ]] || return 0
+  local current
+  if [[ -z "$user_set_harbor_password" ]]; then
+    current=$(sed -n 's/^harbor_admin_password: "\(.*\)"$/\1/p' /opt/harbor/harbor.yml | head -n 1)
+    [[ -n "$current" ]] && HARBOR_PASSWORD="$current"
+  fi
+  if [[ -z "$user_set_harbor_db_password" ]]; then
+    current=$(awk '/^database:/{f=1;next} /^[^ #]/{f=0} f && $1=="password:"{print $2; exit}' /opt/harbor/harbor.yml)
+    [[ -n "$current" ]] && HARBOR_DB_PASSWORD="$current"
+  fi
+}
+
+function run_harbor_prepare () {
+  if [[ ! -x /opt/harbor/prepare ]]; then
+    echo "Error: /opt/harbor/prepare not found - is Harbor installed?"
+    return 1
+  fi
+  /opt/harbor/prepare || return 1
+}
+
+function verify_served_certificate () {
+  # Truthfully verify nginx is actually serving the certificate on disk
+  local expected served attempt max_attempts=12 wait_seconds=5
+  expected=$(openssl x509 -noout -fingerprint -sha256 -in "$certs_dir/$REGISTRY_COMMON_NAME.crt" 2>/dev/null | cut -d= -f2)
+  if [[ -z "$expected" ]]; then
+    echo "Error: Unable to read $certs_dir/$REGISTRY_COMMON_NAME.crt to verify the served certificate."
+    return 1
+  fi
+  echo "  Verifying the registry is serving the new certificate..."
+  for ((attempt=1; attempt<=max_attempts; attempt++)); do
+    served=$(echo | openssl s_client -connect "$mgmt_ip:$HARBOR_PORT" -servername "$REGISTRY_COMMON_NAME" 2>/dev/null \
+        | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
+    if [[ -n "$served" && "$served" == "$expected" ]]; then
+      echo "  Verified: the served certificate matches $certs_dir/$REGISTRY_COMMON_NAME.crt"
+      return 0
+    fi
+    echo "  Attempt $attempt/$max_attempts: served certificate does not match yet. Retrying in ${wait_seconds}s..."
+    sleep "$wait_seconds"
+  done
+  echo "Error: The registry is NOT serving the expected certificate after $((max_attempts * wait_seconds))s."
+  return 1
 }
 
 # --- Install-State Functions --- #
