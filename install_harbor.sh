@@ -2,6 +2,14 @@
 
 # This script contains functions for installing a Harbor registry on Ubuntu for storing container images
 
+# Record which variables the caller explicitly set BEFORE defaults are applied, so
+# recorded install-time values from .install-env can fill in unset variables without
+# ever overriding an explicit user choice (precedence: env > .install-env > default)
+user_set_registry_common_name=${REGISTRY_COMMON_NAME+x}
+user_set_harbor_port=${HARBOR_PORT+x}
+user_set_harbor_version=${HARBOR_VERSION+x}
+user_set_harbor_password=${HARBOR_PASSWORD+x}
+
 # --- User Defined Variables --- #
 DEBUG=${DEBUG:-1}
 
@@ -18,7 +26,7 @@ COUNTRY=${COUNTRY:-"US"}
 STATE=${STATE:-"MA"}
 LOCATION=${LOCATION:-"BOSTON"}
 ORGANIZATION=${ORGANIZATION:-"SELF"}
-REGISTRY_COMMON_NAME=${REGISTRY_COMMON_NAME:-"regsitry.edge.lab"}
+REGISTRY_COMMON_NAME=${REGISTRY_COMMON_NAME:-"registry.edge.lab"}
 DURATION_DAYS=${DURATION_DAYS:-"3650"}
 
 # Update certificate options
@@ -36,12 +44,21 @@ mgmt_ip=$(hostname -I | awk '{print $1}')
 mgmt_if=$(ip a |grep "$(hostname -I |awk '{print $1}')" | awk '{print $NF}')
 user_name=${SUDO_USER:-$(whoami)}
 current_hostname=$(hostname)
+certs_dir="/opt/harbor/certs"
+install_env_file="/opt/harbor/.install-env"
+docker_certs_root="/etc/docker/certs.d"
+data_dir="/data"
+data_preexisting=0
+recorded_install_files_dir=""
+recorded_docker_group_added=""
+recorded_install_user=""
 
 #### --- Functions --- ###
 
 # --- Menu Functions --- #
 
 function install_harbor {
+  debug_run write_install_env
   debug_run install_docker_utility
   debug_run cert_gen
   debug_run harbor_cert_install
@@ -59,6 +76,7 @@ function install_harbor {
 }
 
 function uninstall_harbor {
+  load_install_env
   echo "  Uninstalling Harbor registry"
   echo "  Removing containers..."
   docker compose -f /opt/harbor/docker-compose.yml down
@@ -84,6 +102,7 @@ function harbor_offline_prep {
 
 
 function update_certificates {
+  load_install_env
   echo "  Stopping Harbor containers..."
   docker compose -f /opt/harbor/docker-compose.yml down
   debug_run new_cert_check
@@ -280,7 +299,14 @@ function install_docker_utility() {
         echo "Error: The docker service is not active after 'systemctl enable --now docker'."
         return 1
     fi
-    usermod -aG docker "$user_name"
+    # Record whether this run added the docker group membership so uninstall
+    # removes only what the installer added
+    if id -nG "$user_name" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+        echo "  User $user_name is already in the docker group"
+    else
+        usermod -aG docker "$user_name"
+        set_install_env_value DOCKER_GROUP_ADDED 1
+    fi
 }
 
 function create_bridge_json () {
@@ -543,6 +569,67 @@ function new_cert_check() {
     echo "  or provide USER_CERT_CRT, USER_CERT_KEY, and USER_CA_CRT for user-supplied certificates."
     exit 1
   fi
+}
+
+# --- Install-State Functions --- #
+
+function write_install_env () {
+  # FIRST mutating step of install: record the install-time values (never the
+  # password) so uninstall and update-certificates operate on what was actually
+  # installed, not on whatever the current environment defaults to
+  mkdir -p "$(dirname "$install_env_file")"
+  cat > "$install_env_file" <<EOF
+# Harbor install-time state - written by install_harbor.sh (no secrets stored here)
+# Consumed by uninstall-harbor and update-certificates. Do not edit.
+REGISTRY_COMMON_NAME=$REGISTRY_COMMON_NAME
+HARBOR_PORT=$HARBOR_PORT
+HARBOR_VERSION=$HARBOR_VERSION
+INSTALL_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+INSTALL_USER=$user_name
+INSTALL_FILES_DIR=$base_dir/harbor-install-files
+DOCKER_GROUP_ADDED=0
+CA_FINGERPRINT=
+EOF
+  chmod 600 "$install_env_file"
+  echo "  Recorded install-time state in $install_env_file"
+}
+
+function get_install_env_value () {
+  [[ -f "$install_env_file" ]] || return 0
+  sed -n "s|^$1=||p" "$install_env_file" | head -n 1
+}
+
+function set_install_env_value () {
+  local key="$1" value="$2"
+  [[ -f "$install_env_file" ]] || return 0
+  if grep -q "^$key=" "$install_env_file"; then
+    sed -i "s|^$key=.*|$key=$value|" "$install_env_file"
+  else
+    echo "$key=$value" >> "$install_env_file"
+  fi
+}
+
+function load_install_env () {
+  # Fill in values recorded at install time. Precedence: explicitly-set
+  # environment > .install-env > script default.
+  [[ -f "$install_env_file" ]] || return 0
+  local recorded
+  if [[ -z "$user_set_registry_common_name" ]]; then
+    recorded=$(get_install_env_value REGISTRY_COMMON_NAME)
+    [[ -n "$recorded" ]] && REGISTRY_COMMON_NAME="$recorded"
+  fi
+  if [[ -z "$user_set_harbor_port" ]]; then
+    recorded=$(get_install_env_value HARBOR_PORT)
+    [[ -n "$recorded" ]] && HARBOR_PORT="$recorded"
+  fi
+  if [[ -z "$user_set_harbor_version" ]]; then
+    recorded=$(get_install_env_value HARBOR_VERSION)
+    [[ -n "$recorded" ]] && HARBOR_VERSION="$recorded"
+  fi
+  recorded_install_files_dir=$(get_install_env_value INSTALL_FILES_DIR)
+  recorded_docker_group_added=$(get_install_env_value DOCKER_GROUP_ADDED)
+  recorded_install_user=$(get_install_env_value INSTALL_USER)
+  echo "  Using install-time state from $install_env_file (REGISTRY_COMMON_NAME=$REGISTRY_COMMON_NAME, HARBOR_PORT=$HARBOR_PORT)"
 }
 
 # --- Utility Functions --- #
@@ -968,11 +1055,16 @@ function help {
   echo ""
   echo "[Parameters]            | [Description]"
   echo "help                    | Display this help message"
-  echo "install-harbor          | Installs Harbor regsitry"
+  echo "install-harbor          | Installs Harbor registry"
   echo "uninstall-harbor        | Uninstalls Harbor registry"
   echo "offline-prep            | Prepares an offline package"
   echo "update-certificates     | Updates Harbor TLS certificates (self-signed or user-supplied)"
 }
+
+# When sourced (e.g. by a test harness), stop here without running the CLI wrapper
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
 
 # Start CLI Wrapper
 while [[ $# -gt 0 ]]; do
