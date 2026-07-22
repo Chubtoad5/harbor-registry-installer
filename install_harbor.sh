@@ -31,6 +31,7 @@ USER_CA_CRT=${USER_CA_CRT:-""}
 DOCKER_PACKAGES=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
 base_dir=$(pwd)
 os_id=""
+os_release_version=""
 mgmt_ip=$(hostname -I | awk '{print $1}')
 mgmt_if=$(ip a |grep "$(hostname -I |awk '{print $1}')" | awk '{print $NF}')
 user_name=${SUDO_USER:-$(whoami)}
@@ -107,14 +108,102 @@ os_type() {
         source /etc/os-release
         echo "  OS type is: $ID"
         os_id="$ID"
+        os_release_version="$ID-${VERSION_ID:-unknown}"
     else
         echo "Unknown or unsupported OS $os_id."
         exit 1
     fi
 }
 
+# Function to check required commands up front, with a distro install hint
+# (minimal cloud images frequently lack curl)
+require_cmds() {
+    local missing=()
+    local cmd
+    for cmd in "$@"; do
+        if ! command -v "$cmd" &> /dev/null; then
+            missing+=("$cmd")
+        fi
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "Error: Required command(s) not found: ${missing[*]}"
+        case "$os_id" in
+            ubuntu|debian)
+                echo "  Hint: apt-get update && apt-get install -y ${missing[*]}"
+                ;;
+            rhel|centos|rocky|almalinux|fedora)
+                echo "  Hint: dnf install -y ${missing[*]}"
+                ;;
+            sles|opensuse-leap)
+                echo "  Hint: zypper install -y ${missing[*]}"
+                ;;
+        esac
+        exit 1
+    fi
+}
+
+function preflight_checks () {
+  # Verify the commands this subcommand will need before doing any work
+  local required_cmds=()
+  case "$1" in
+    install)
+      required_cmds=(tar openssl)
+      # Online mode needs to fetch install_packages.sh and the Harbor installer
+      [[ -f "$base_dir/harbor-install-files/VERSION.txt" ]] || required_cmds+=(curl)
+      ;;
+    offline-prep)
+      required_cmds=(tar curl)
+      ;;
+    update-certificates)
+      required_cmds=(openssl)
+      ;;
+  esac
+  require_cmds "${required_cmds[@]}"
+}
+
+function select_docker_packages () {
+    # Pick the per-distro docker package list up front so every path (online
+    # install, air-gapped install, and save) uses the correct names. Docker CE
+    # is not published for the SUSE family; the distro packages are used
+    # (docker-compose is a separate package there, and Harbor requires compose).
+    case "$os_id" in
+        sles|opensuse-leap)
+            DOCKER_PACKAGES=(docker docker-compose)
+            ;;
+    esac
+}
+
+function ensure_dnf_config_manager () {
+    # 'dnf config-manager' is provided by dnf-plugins-core, which is absent on
+    # minimal images
+    if ! dnf config-manager --help &> /dev/null; then
+        echo "  Installing dnf-plugins-core (provides 'dnf config-manager')"
+        if ! dnf install -y dnf-plugins-core; then
+            echo "Error: Failed to install dnf-plugins-core (required for 'dnf config-manager')."
+            return 1
+        fi
+    fi
+}
+
+function ensure_docker_repo () {
+    # Only (re)add the docker repository when it is not already configured
+    case "$os_id" in
+        ubuntu|debian)
+            [[ -f /etc/apt/sources.list.d/docker.list ]] || add_docker_repo
+            ;;
+        rhel|centos|rocky|almalinux|fedora)
+            [[ -f /etc/yum.repos.d/docker-ce.repo ]] || add_docker_repo
+            ;;
+        sles|opensuse-leap)
+            : # distro repositories already provide the docker packages
+            ;;
+        *)
+            add_docker_repo
+            ;;
+    esac
+}
+
 function add_docker_repo () {
-    os_type
     echo "Adding docker repo..."
     case "$os_id" in
         ubuntu)
@@ -129,54 +218,113 @@ function add_docker_repo () {
             chmod a+r /etc/apt/keyrings/docker.asc
             echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
             ;;
-        rhel|rocky|almalinux)
+        rhel)
+            ensure_dnf_config_manager || return 1
             dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
             ;;
-        centos)
+        rocky|almalinux|centos)
+            # Docker designates the 'centos' repo path for CentOS/Rocky/Alma
+            ensure_dnf_config_manager || return 1
             dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
             ;;
         fedora)
             dnf-3 config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
             ;;
+        sles|opensuse-leap)
+            : # no Docker CE repo for SUSE; the distro docker packages are used
+            ;;
         *)
             echo "Error: Unsupported OS '$os_id'. Manual install of Docker required."
-            rm -rf /etc/docker
-            exit 1
+            return 1
             ;;
     esac
 }
 
 function install_packages_check () {
-    if [[ ! -f $base_dir/harbor-install-files/apt-packages/install_packages.sh ]]; then
+    # Refetch when the cached copy is missing or zero-byte (a previously failed
+    # download must never be reused)
+    local dest="$base_dir/harbor-install-files/apt-packages/install_packages.sh"
+    if [[ ! -s "$dest" ]]; then
         mkdir -p "$base_dir/harbor-install-files/apt-packages"
+        rm -f "$dest"
         echo "  Downloading install_packages.sh..."
-        curl -sfL https://github.com/Chubtoad5/install-packages/raw/refs/heads/main/install_packages.sh  -o "$base_dir/harbor-install-files/apt-packages/install_packages.sh"
-        chmod +x $base_dir/harbor-install-files/apt-packages/install_packages.sh
+        if ! curl -fsSL https://github.com/Chubtoad5/install-packages/raw/refs/heads/main/install_packages.sh -o "$dest"; then
+            echo "Error: Failed to download install_packages.sh."
+            rm -f "$dest"
+            return 1
+        fi
+        chmod +x "$dest"
     fi
 }
 
 function install_docker_utility() {
-    install_packages_check
-    cd $base_dir/harbor-install-files/apt-packages
-    if [[ -f  $base_dir/harbor-install-files/apt-packages/offline-packages.tar.gz ]]; then
-        ./install_packages.sh offline "${DOCKER_PACKAGES[@]}"
+    install_packages_check || return 1
+    create_bridge_json || return 1
+    cd "$base_dir/harbor-install-files/apt-packages" || return 1
+    if [[ -f "$base_dir/harbor-install-files/apt-packages/offline-packages.tar.gz" ]]; then
+        ./install_packages.sh offline "${DOCKER_PACKAGES[@]}" || { cd "$base_dir"; return 1; }
     else
-        add_docker_repo
-        ./install_packages.sh online "${DOCKER_PACKAGES[@]}"
+        ensure_docker_repo || { cd "$base_dir"; return 1; }
+        ./install_packages.sh online "${DOCKER_PACKAGES[@]}" || { cd "$base_dir"; return 1; }
     fi
-    systemctl enable --now docker || true
-    usermod -aG docker $user_name
-    cd $base_dir
+    cd "$base_dir" || return 1
+    if ! command -v docker &> /dev/null; then
+        echo "Error: Docker installation failed."
+        return 1
+    fi
+    if ! systemctl enable --now docker; then
+        echo "Error: Failed to enable and start the docker service."
+        return 1
+    fi
+    if ! systemctl is-active --quiet docker; then
+        echo "Error: The docker service is not active after 'systemctl enable --now docker'."
+        return 1
+    fi
+    usermod -aG docker "$user_name"
 }
 
 function create_bridge_json () {
+  # Merge bip into an existing daemon.json instead of clobbering it - /etc/docker
+  # can hold settings this script does not own (synced from images-pull-push)
   mkdir -p /etc/docker
-  cat <<EOF | tee /etc/docker/daemon.json > /dev/null
+  if [[ -f /etc/docker/daemon.json ]]; then
+      if grep -q '"bip"' /etc/docker/daemon.json; then
+          echo "  Existing /etc/docker/daemon.json already defines \"bip\", leaving it unchanged"
+          return 0
+      fi
+      local backup
+      backup=$(mktemp)
+      cp /etc/docker/daemon.json "$backup"
+      if command -v jq &> /dev/null; then
+          if ! jq --arg bip "$DOCKER_BRIDGE_CIDR" '. + {bip: $bip}' "$backup" > /etc/docker/daemon.json; then
+              cp "$backup" /etc/docker/daemon.json
+              rm -f "$backup"
+              echo "Error: Failed to merge bip into existing /etc/docker/daemon.json."
+              return 1
+          fi
+      elif command -v python3 &> /dev/null; then
+          if ! python3 -c 'import json,sys; p="/etc/docker/daemon.json"; d=json.load(open(p)); d["bip"]=sys.argv[1]; f=open(p,"w"); json.dump(d,f,indent=2); f.write("\n")' "$DOCKER_BRIDGE_CIDR"; then
+              cp "$backup" /etc/docker/daemon.json
+              rm -f "$backup"
+              echo "Error: Failed to merge bip into existing /etc/docker/daemon.json."
+              return 1
+          fi
+      else
+          echo "Warning: /etc/docker/daemon.json exists but neither jq nor python3 is available to merge \"bip\": \"$DOCKER_BRIDGE_CIDR\"."
+          echo "         Leaving the existing file unchanged; set bip manually if a custom docker bridge CIDR is required."
+          rm -f "$backup"
+          return 0
+      fi
+      rm -f "$backup"
+      echo "  Merged bip: $DOCKER_BRIDGE_CIDR into existing /etc/docker/daemon.json"
+  else
+      cat <<EOF | tee /etc/docker/daemon.json > /dev/null
 {
   "bip": "$DOCKER_BRIDGE_CIDR"
 }
 EOF
-  echo "  Created /etc/docker/daemon.json with bip: $DOCKER_BRIDGE_CIDR"
+      echo "  Created /etc/docker/daemon.json with bip: $DOCKER_BRIDGE_CIDR"
+  fi
 }
 
 function cert_gen () {
@@ -278,15 +426,37 @@ EOF
 # --- Offline Prep Functions --- #
 
 function apt_download_packs () {
-  install_packages_check
-  add_docker_repo
-  cd $base_dir/harbor-install-files/apt-packages
-  ./install_packages.sh save "${DOCKER_PACKAGES[@]}"
-  cd $base_dir
+  install_packages_check || return 1
+  ensure_docker_repo || return 1
+  cd "$base_dir/harbor-install-files/apt-packages" || return 1
+  if ! ./install_packages.sh save "${DOCKER_PACKAGES[@]}"; then
+    echo "Error: install_packages.sh failed to save the docker packages (${DOCKER_PACKAGES[*]})."
+    cd "$base_dir"
+    return 1
+  fi
+  # Verify a usable package archive was actually produced - the offline package
+  # contract includes offline-packages.tar.gz
+  if [[ ! -s offline-packages.tar.gz ]] || ! tar -tzf offline-packages.tar.gz 2>/dev/null | grep -qE '\.(deb|rpm)$'; then
+    echo "Error: offline-packages.tar.gz was not produced or contains no .deb/.rpm packages."
+    cd "$base_dir"
+    return 1
+  fi
+  cd "$base_dir" || return 1
 }
 
 function download_harbor_offline_package() {
-  curl -fsSLo $base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz https://github.com/goharbor/harbor/releases/download/v$HARBOR_VERSION/harbor-offline-installer-v$HARBOR_VERSION.tgz
+  local installer_tgz="$base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz"
+  # Refetch when a previous download left a zero-byte file
+  [[ -f "$installer_tgz" && ! -s "$installer_tgz" ]] && rm -f "$installer_tgz"
+  if [[ -f "$installer_tgz" ]]; then
+    echo "  Harbor offline installer already downloaded."
+    return 0
+  fi
+  if ! curl -fsSLo "$installer_tgz" "https://github.com/goharbor/harbor/releases/download/v$HARBOR_VERSION/harbor-offline-installer-v$HARBOR_VERSION.tgz"; then
+    echo "Error: Failed to download the Harbor offline installer v$HARBOR_VERSION."
+    rm -f "$installer_tgz"
+    return 1
+  fi
 }
 
 function generate_bundle_licenses() {
@@ -813,6 +983,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     install-harbor)
       check_root_privileges
+      os_type
+      select_docker_packages
+      preflight_checks install
       echo "###   Harbor Installation Started - $(date)  ###"
       install_harbor
       echo "###   Harbor Installation Finished - $(date)  ###"
@@ -826,6 +999,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     offline-prep)
       check_root_privileges
+      os_type
+      select_docker_packages
+      preflight_checks offline-prep
       echo "###   Harbor Offline Preparation Started - $(date)   ###"
       harbor_offline_prep
       echo "###   Harbor Offline Preparation Finished - $(date)   ###"
@@ -833,7 +1009,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     update-certificates)
       check_root_privileges
-      echo "###   Update Certificattes Started - $(date)  ###"
+      os_type
+      preflight_checks update-certificates
+      echo "###   Update Certificates Started - $(date)  ###"
       update_certificates
       echo "###   Update Certificates Finished - $(date)  ###"
       exit 0
