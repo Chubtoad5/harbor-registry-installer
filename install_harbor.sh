@@ -9,6 +9,7 @@ user_set_registry_common_name=${REGISTRY_COMMON_NAME+x}
 user_set_harbor_port=${HARBOR_PORT+x}
 user_set_harbor_version=${HARBOR_VERSION+x}
 user_set_harbor_password=${HARBOR_PASSWORD+x}
+user_set_harbor_db_password=${HARBOR_DB_PASSWORD+x}
 
 # --- User Defined Variables --- #
 DEBUG=${DEBUG:-1}
@@ -18,6 +19,7 @@ HARBOR_VERSION=${HARBOR_VERSION:-2.15.0}
 HARBOR_PORT=${HARBOR_PORT:-443}
 HARBOR_USERNAME=${HARBOR_USERNAME:-admin}
 HARBOR_PASSWORD=${HARBOR_PASSWORD:-Harbor12345}
+HARBOR_DB_PASSWORD=${HARBOR_DB_PASSWORD:-root123}
 DOCKER_BRIDGE_CIDR=${DOCKER_BRIDGE_CIDR:-"172.30.0.1/16"}
 PROJECTS=${PROJECTS:-""}
 
@@ -58,21 +60,32 @@ recorded_install_user=""
 # --- Menu Functions --- #
 
 function install_harbor {
-  debug_run write_install_env
-  debug_run install_docker_utility
-  debug_run cert_gen
-  debug_run harbor_cert_install
-  debug_run gen_harbor_yml
-  debug_run run_harbor_installer
-  debug_run create_harbor_service
-  debug_run create_harbor_projects
+  if [[ -d "$data_dir/database" ]]; then
+    data_preexisting=1
+    echo "  NOTE: Existing Harbor data found in $data_dir."
+    echo "  HARBOR_PASSWORD is only applied on the very first install - the admin"
+    echo "  password already stored in $data_dir remains in effect for this install."
+    echo "  Run 'uninstall-harbor' first if you need a clean install with a new password."
+  fi
+  run_step write_install_env
+  run_step install_docker_utility
+  run_step cert_gen
+  run_step harbor_cert_install
+  run_step gen_harbor_yml
+  run_step run_harbor_installer
+  run_step create_harbor_service
+  run_step create_harbor_projects
   echo "# ---  Harbor Install Completed! --- #"
   echo "  Harbor install and compose files are in /opt/harbor and /data directories"
   echo "  Harbor Version: $HARBOR_VERSION"
   echo "  URL: https://$mgmt_ip:$HARBOR_PORT"
   echo "  FQDN URL: https://$REGISTRY_COMMON_NAME:$HARBOR_PORT"
   echo "  Username: $HARBOR_USERNAME"
-  echo "  Password: $HARBOR_PASSWORD"
+  if [[ $data_preexisting -eq 1 ]]; then
+    echo "  Password: (unchanged - the password stored in $data_dir from the prior install remains in effect)"
+  else
+    echo "  Password: $HARBOR_PASSWORD"
+  fi
 }
 
 function uninstall_harbor {
@@ -92,9 +105,9 @@ function uninstall_harbor {
 
 function harbor_offline_prep {
   echo "  Preparing an offline package for Harbor registry..."
-  debug_run apt_download_packs
-  debug_run download_harbor_offline_package
-  debug_run prepare_offline_package
+  run_step apt_download_packs
+  run_step download_harbor_offline_package
+  run_step prepare_offline_package
   echo "  Offline package generation completed..."
   echo "  Upload harbor-offline-package.tar.gz to your airgapped system running $os_release_version"
 }
@@ -406,22 +419,28 @@ function harbor_cert_install () {
 }
 
 function run_harbor_installer() {
-  if [ -f $base_dir/harbor-install-files/VERSION.txt ]; then
-    tar xzvf $base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz -C /opt/
+  local installer_tgz="$base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz"
+  if [ -f "$base_dir/harbor-install-files/VERSION.txt" ]; then
+    if [[ ! -s "$installer_tgz" ]]; then
+      echo "Error: $installer_tgz is missing or empty in this offline bundle."
+      return 1
+    fi
   else
-    curl -fsSLo $base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz https://github.com/goharbor/harbor/releases/download/v$HARBOR_VERSION/harbor-offline-installer-v$HARBOR_VERSION.tgz
-    tar xzvf $base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz -C /opt/
+    download_harbor_offline_package || return 1
   fi
-  /opt/harbor/install.sh
+  tar xzvf "$installer_tgz" -C /opt/ || return 1
+  /opt/harbor/install.sh || return 1
   echo "  creating crumb file..."
-  cat > $base_dir/harbor-install-files/read_this_crumb.txt <<EOF
+  # No credentials in the crumb file - it is a plaintext breadcrumb, not a vault
+  cat > "$base_dir/harbor-install-files/read_this_crumb.txt" <<EOF
 Harbor install files are located in /opt/harbor and /data directories
 Version: $HARBOR_VERSION
 URL: https://$mgmt_ip:$HARBOR_PORT
 FQDN URL: https://$REGISTRY_COMMON_NAME:$HARBOR_PORT
 Default Username: $HARBOR_USERNAME
-Default Password: $HARBOR_PASSWORD
+Password: (not stored here - the admin password set at install time is in effect)
 EOF
+  chmod 600 "$base_dir/harbor-install-files/read_this_crumb.txt"
 }
 
 function create_harbor_service () {
@@ -433,19 +452,17 @@ After=docker.service systemd-networkd.service systemd-resolved.service
 Requires=docker.service
 
 [Service]
-Type=forking
-Restart=on-failure
-RestartSec=5
+Type=oneshot
+RemainAfterExit=yes
 ExecStart=/usr/bin/docker compose -f /opt/harbor/docker-compose.yml up -d
 ExecStop=/usr/bin/docker compose -f /opt/harbor/docker-compose.yml down
-RemainAfterExit=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
     chmod 644 /etc/systemd/system/harbor-docker.service
     systemctl daemon-reload
-    systemctl enable --now harbor-docker.service
+    systemctl enable --now harbor-docker.service || return 1
 }
 
 
@@ -521,10 +538,10 @@ EOF
 
 function prepare_offline_package() {
   echo "  Generating offline archive..."
-  cd $base_dir
-  echo "Offline package generated on $(date) for $os_release_version and Harbor version $HARBOR_VERSION" | tee $base_dir/harbor-install-files/VERSION.txt
+  cd "$base_dir" || return 1
+  echo "Offline package generated on $(date) for $os_release_version and Harbor version $HARBOR_VERSION" | tee "$base_dir/harbor-install-files/VERSION.txt"
   generate_bundle_licenses
-  tar czvf harbor-offline-package.tar.gz harbor-install-files/ install_harbor.sh LICENSES
+  tar czvf harbor-offline-package.tar.gz harbor-install-files/ install_harbor.sh LICENSES || return 1
 }
 
 # --- Update Certificate Functions --- #
@@ -648,18 +665,34 @@ function debug_run() {
   fi
 }
 
+function run_step() {
+  # Phase boundary: a failed step must fail the whole run - never print a green
+  # completion banner (or exit 0) over a failed install
+  if ! debug_run "$@"; then
+    echo "ERROR: Step '$1' failed. Aborting - see the output above for details." >&2
+    exit 1
+  fi
+}
+
 create_harbor_projects() {
     local max_attempts=12
     local wait_seconds=5
     local attempt=1
     local connected=false
-    read -a PROJECTS_ARRAY <<< "$PROJECTS"
+    local health_status=""
+    local rc=0
+    local curl_cfg
+    read -r -a PROJECTS_ARRAY <<< "$PROJECTS"
+    # Keep credentials off argv: pass them to curl via a root-only config file
+    curl_cfg=$(mktemp)
+    chmod 600 "$curl_cfg"
+    printf 'user = "%s:%s"\n' "$HARBOR_USERNAME" "$HARBOR_PASSWORD" > "$curl_cfg"
     # 1. Connectivity & Auth Pre-Check with Retry Loop
-    echo "  Starting Harbor API health check (Timeout: $(($max_attempts * $wait_seconds))s)..."
+    echo "  Starting Harbor API health check (Timeout: $((max_attempts * wait_seconds))s)..."
 
     while [ $attempt -le $max_attempts ]; do
-        local health_status=$(curl -s -o /dev/null -w "%{http_code}" \
-            -u "$HARBOR_USERNAME:$HARBOR_PASSWORD" -k \
+        health_status=$(curl -s -o /dev/null -w "%{http_code}" \
+            -K "$curl_cfg" -k \
             "https://$mgmt_ip:$HARBOR_PORT/api/v2.0/projects?page_size=1")
 
         if [[ "$health_status" == "200" ]]; then
@@ -668,51 +701,68 @@ create_harbor_projects() {
             break
         fi
 
-        echo "  Attempt $attempt/$max_attempts: Harbor API unreachable (Status: $health_status). Retrying in ${wait_seconds}s..."
+        echo "  Attempt $attempt/$max_attempts: Harbor API not ready (Status: $health_status). Retrying in ${wait_seconds}s..."
         sleep $wait_seconds
         ((attempt++))
     done
 
     if [ "$connected" = false ]; then
-        echo "  CRITICAL: Harbor API remained unreachable after 30 seconds."
-        return 0
+        rm -f "$curl_cfg"
+        if [[ "$health_status" == "401" ]]; then
+            echo "  CRITICAL: Harbor API rejected the credentials (HTTP 401)."
+            if [[ $data_preexisting -eq 1 ]]; then
+                echo "  This install reused existing Harbor data in $data_dir - the ORIGINAL admin password is in effect, not the HARBOR_PASSWORD passed to this run."
+            fi
+        else
+            echo "  CRITICAL: Harbor API remained unreachable after $((max_attempts * wait_seconds)) seconds (last status: $health_status)."
+        fi
+        return 1
     fi
 
     # 2. Loop through the PROJECTS array
     if [[ -z "${PROJECTS_ARRAY[*]}" ]]; then
         echo "  No projects defined in the list. Skipping project creation..."
+        rm -f "$curl_cfg"
         return 0
     fi
     echo "  Found projects to create"
     for REGISTRY_PROJECT_NAME in "${PROJECTS_ARRAY[@]}"; do
         echo "  Processing project: $REGISTRY_PROJECT_NAME"
 
-        local check_cmd="curl -s -u \"$HARBOR_USERNAME:$HARBOR_PASSWORD\" -k \"https://$mgmt_ip:$HARBOR_PORT/api/v2.0/projects?name=$REGISTRY_PROJECT_NAME\""
-
         # Check if project exists
-        local exists=$(eval "$check_cmd" | grep -o '"name":"'$REGISTRY_PROJECT_NAME'"' | awk -F':' '{print $2}' | tr -d '"')
+        local exists
+        exists=$(curl -s -K "$curl_cfg" -k "https://$mgmt_ip:$HARBOR_PORT/api/v2.0/projects?name=$REGISTRY_PROJECT_NAME" \
+            | grep -o "\"name\":\"$REGISTRY_PROJECT_NAME\"" | awk -F':' '{print $2}' | tr -d '"')
 
         if [[ "$exists" == "$REGISTRY_PROJECT_NAME" ]]; then
             echo "  Result: Project '$REGISTRY_PROJECT_NAME' already exists."
         else
             # 3. Create the project
-            local create_status=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            local create_status
+            create_status=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
                 -H "Content-Type: application/json" \
-                -u "$HARBOR_USERNAME:$HARBOR_PASSWORD" \
+                -K "$curl_cfg" \
                 -k -d "{ \"project_name\": \"$REGISTRY_PROJECT_NAME\", \"public\": false }" \
                 "https://$mgmt_ip:$HARBOR_PORT/api/v2.0/projects")
 
             # 4. Final Verification
-            local verified=$(eval "$check_cmd" | grep -o '"name":"'$REGISTRY_PROJECT_NAME'"' | awk -F':' '{print $2}' | tr -d '"')
+            local verified
+            verified=$(curl -s -K "$curl_cfg" -k "https://$mgmt_ip:$HARBOR_PORT/api/v2.0/projects?name=$REGISTRY_PROJECT_NAME" \
+                | grep -o "\"name\":\"$REGISTRY_PROJECT_NAME\"" | awk -F':' '{print $2}' | tr -d '"')
 
             if [[ "$verified" == "$REGISTRY_PROJECT_NAME" ]]; then
                 echo "  Success: Project '$REGISTRY_PROJECT_NAME' verified (HTTP $create_status)."
             else
                 echo "  Failure: Project '$REGISTRY_PROJECT_NAME' creation failed (HTTP $create_status)."
-                return 0
+                rc=1
             fi
         fi
     done
+    rm -f "$curl_cfg"
+    if [[ $rc -ne 0 ]]; then
+        echo "  One or more projects could not be created."
+        return 1
+    fi
     echo "  All project checks and creations completed successfully."
 }
 
@@ -726,7 +776,7 @@ function check_root_privileges() {
 # --- File Generation Functions --- #
 
 function gen_harbor_yml () {
-  [ -f /opt/harbor/harbor.yml ] || mkdir -p /opt/harbor
+  mkdir -p /opt/harbor
   cat > /opt/harbor/harbor.yml <<EOF
 # Configuration file of Harbor
 
@@ -779,7 +829,7 @@ harbor_admin_password: "$HARBOR_PASSWORD"
 # Harbor DB configuration
 database:
   # The password for the user('postgres' by default) of Harbor DB. Change this before any production use.
-  password: root123
+  password: $HARBOR_DB_PASSWORD
   # The maximum number of connections in the idle connection pool. If it <=0, no idle connections are retained.
   max_idle_conns: 100
   # The maximum number of open connections to the database. If it <= 0, then there is no limit on the number of open connections.
@@ -1046,6 +1096,8 @@ cache:
 #   quota_update_provider: redis # Or db
 EOF
 
+  # harbor.yml carries the admin and database passwords - keep it root-only
+  chmod 600 /opt/harbor/harbor.yml
 }
 
 # --- Main Menu function --- #
