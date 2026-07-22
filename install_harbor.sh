@@ -89,7 +89,7 @@ function install_harbor {
   if [[ $data_preexisting -eq 1 ]]; then
     echo "  Password: (unchanged - the password stored in $data_dir from the prior install remains in effect)"
   else
-    echo "  Password: $HARBOR_PASSWORD"
+    echo "  Password: ******** (the value passed via HARBOR_PASSWORD, or the documented default)"
   fi
 }
 
