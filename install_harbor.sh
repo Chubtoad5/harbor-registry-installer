@@ -517,10 +517,13 @@ function harbor_cert_install () {
   # private key
   mkdir -p "$data_dir/ca_download"
   mkdir -p "$docker_certs_root/$REGISTRY_COMMON_NAME:$HARBOR_PORT"
-  cp "$certs_dir/$REGISTRY_COMMON_NAME.cert" "$docker_certs_root/$REGISTRY_COMMON_NAME:$HARBOR_PORT/" || return 1
   cp "$certs_dir/ca.crt" "$docker_certs_root/$REGISTRY_COMMON_NAME:$HARBOR_PORT/" || return 1
-  # Remove private keys leaked into certs.d by pre-fix installs
-  rm -f "$docker_certs_root/$REGISTRY_COMMON_NAME:$HARBOR_PORT"/*.key
+  # Remove private keys leaked into certs.d by pre-fix installs, and server
+  # .cert files copied by pre-fix installs: docker treats .cert/.key as a
+  # CLIENT certificate pair, so an orphaned .cert (key no longer copied)
+  # makes every docker login fail with "missing key <name>.key"
+  rm -f "$docker_certs_root/$REGISTRY_COMMON_NAME:$HARBOR_PORT"/*.key \
+        "$docker_certs_root/$REGISTRY_COMMON_NAME:$HARBOR_PORT"/*.cert
   # Copy the actual CA certificate (not the server cert) to ca_download for external consumers
   cp "$certs_dir/ca.crt" "$data_dir/ca_download/ca.crt" || return 1
 
