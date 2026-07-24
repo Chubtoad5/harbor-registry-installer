@@ -189,12 +189,15 @@ function update_certificates {
   fi
   load_install_env
   preserve_existing_yml_passwords
+  # Validate + stage the new cert material BEFORE stopping anything: a bad
+  # user-supplied chain (or failed generation) must abort with the running
+  # stack untouched, not leave the registry down
+  run_step new_cert_check
   echo "  Stopping Harbor containers..."
   if [[ -f /etc/systemd/system/harbor-docker.service ]]; then
     systemctl stop harbor-docker.service || true
   fi
   docker compose -f /opt/harbor/docker-compose.yml down || true
-  run_step new_cert_check
   run_step harbor_cert_install
   run_step gen_harbor_yml
   # Harbor's nginx config is rendered from harbor.yml by prepare - without this
