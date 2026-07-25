@@ -383,6 +383,46 @@ function install_packages_check () {
     fi
 }
 
+function ensure_el_kernel_modules() {
+    # EL10 ships the legacy xtables match modules (xt_addrtype et al.) in
+    # kernel-modules-extra, which stock Rocky/Alma/RHEL 10 cloud images omit.
+    # dockerd cannot create its NAT chains without xt_addrtype and never starts (P4-01)
+    case "$os_id" in
+        rhel|centos|rocky|almalinux|fedora) ;;
+        *) return 0 ;;
+    esac
+    if modprobe -n xt_addrtype &>/dev/null; then
+        return 0
+    fi
+    local kver
+    kver=$(uname -r)
+    echo "  Kernel module xt_addrtype is unavailable (the docker daemon requires it)."
+    if [[ -f "$base_dir/harbor-install-files/apt-packages/offline-packages.tar.gz" ]]; then
+        echo "Error: install kernel-modules-extra for the running kernel from local media"
+        echo "  (dnf install kernel-modules-extra-$kver), then re-run this script."
+        return 1
+    fi
+    echo "  Installing kernel-modules-extra-$kver to match the running kernel..."
+    if ! dnf install -y "kernel-modules-extra-$kver"; then
+        # The running kernel's package has aged out of the repos: install the
+        # latest kernel + modules instead, which only take effect after a reboot
+        echo "  kernel-modules-extra for the running kernel is no longer available;"
+        echo "  installing the latest kernel and kernel-modules-extra..."
+        if ! dnf install -y kernel kernel-modules-extra; then
+            echo "Error: Failed to install kernel-modules-extra. Docker cannot start without the xt_addrtype module."
+            return 1
+        fi
+        echo "Error: A newer kernel and kernel-modules-extra were installed, but the running kernel"
+        echo "  ($kver) still has no xt_addrtype module. Reboot into the new kernel, then re-run this script."
+        return 1
+    fi
+    if ! modprobe xt_addrtype; then
+        echo "Error: xt_addrtype still fails to load after installing kernel-modules-extra-$kver."
+        return 1
+    fi
+    echo "  xt_addrtype kernel module loaded."
+}
+
 function install_docker_utility() {
     install_packages_check || return 1
     create_bridge_json || return 1
@@ -398,6 +438,7 @@ function install_docker_utility() {
         echo "Error: Docker installation failed."
         return 1
     fi
+    ensure_el_kernel_modules || return 1
     if ! systemctl enable --now docker; then
         echo "Error: Failed to enable and start the docker service."
         return 1
