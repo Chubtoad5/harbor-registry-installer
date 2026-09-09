@@ -26,11 +26,12 @@ New here? This stands up a private Harbor container registry — Docker, a self-
 and a systemd service so it survives reboots — in a single command.
 
 **Prerequisites**
-- A Linux host with `root` / `sudo` (Ubuntu/Debian, RHEL/Rocky/AlmaLinux/CentOS, or Fedora)
-- ~4 GB RAM, 40 GB+ disk, and `curl` + `openssl` installed
+- A Linux host with `root` / `sudo` (Ubuntu/Debian, RHEL/Rocky/AlmaLinux/CentOS, Fedora, or openSUSE Leap/SLES)
+- ~4 GB RAM, 40 GB+ disk, and `curl` + `openssl` installed (the script preflight-checks these and prints
+  the distro install hint if one is missing)
 - Free TCP port **443** (override with `HARBOR_PORT`)
-- A hostname for the registry — set it with `REGISTRY_COMMON_NAME`. **The built-in default has a typo,
-  so always pass your own.**
+- A hostname for the registry — set it with `REGISTRY_COMMON_NAME` (default: `registry.edge.lab`;
+  always pass your own for anything beyond a throwaway lab)
 
 **1. Get the script**
 ```bash
@@ -58,13 +59,14 @@ air-gapped install, read on.
 ## Features
 
 - Automated Docker CE installation (online or offline)
-- Self-signed TLS certificate generation with SAN support (IP + DNS)
+- Self-signed TLS certificate generation with SAN support (IP + DNS); the CA is generated once and reused across re-installs and renewals
 - Harbor offline installer download, extraction, and configuration
 - Systemd service creation for Harbor auto-start on boot
 - Automatic Harbor project creation via the API
-- Certificate update/rotation (self-signed or user-supplied)
+- Certificate update/rotation (self-signed or user-supplied) with post-update verification that the new certificate is actually being served
 - Offline package generation for air-gapped deployments
-- Clean uninstall with full artifact removal
+- Clean uninstall driven by recorded install-time state (`/opt/harbor/.install-env`); `/data` removal is scoped by default
+- Truthful exit codes: any failed phase aborts with a non-zero exit
 - Debug mode for verbose output
 
 ## Supported Operating Systems
@@ -73,9 +75,12 @@ air-gapped install, read on.
 |---|---|
 | Ubuntu | Fully supported |
 | Debian | Fully supported |
-| RHEL / Rocky / AlmaLinux | Docker repo via `dnf` |
-| CentOS | Docker repo via `dnf` |
+| RHEL | Docker's `linux/rhel` repo via `dnf` (`dnf-plugins-core` installed automatically if missing) |
+| Rocky / AlmaLinux / CentOS | Docker's `linux/centos` repo via `dnf` (Docker's designated path for these) |
 | Fedora | Docker repo via `dnf-3` |
+| openSUSE Leap / SLES | Distro `docker` + `docker-compose` packages via `zypper` (no Docker CE repo exists for SUSE) |
+
+Unsupported distributions exit with a clean error without touching any Docker configuration.
 
 ## Prerequisites
 
@@ -112,9 +117,12 @@ All variables have defaults and can be overridden by exporting them before runni
 | `HARBOR_VERSION` | `2.15.0` | Harbor release version to install |
 | `HARBOR_PORT` | `443` | HTTPS port for the registry |
 | `HARBOR_USERNAME` | `admin` | Admin username |
-| `HARBOR_PASSWORD` | `Harbor12345` | Admin password (change after first login) |
-| `DOCKER_BRIDGE_CIDR` | `172.30.0.1/16` | Custom Docker bridge network CIDR |
+| `HARBOR_PASSWORD` | `Harbor12345` | Admin password (change after first login). **Only applied on the very first install** — see [Changing the Admin Password](#changing-the-admin-password) |
+| `HARBOR_DB_PASSWORD` | `root123` | Harbor's internal PostgreSQL password. Known limitation: the default is the Harbor-upstream `root123`; override it for production use. Written into `harbor.yml` (root-only, mode 600) |
+| `DOCKER_BRIDGE_CIDR` | `172.30.0.1/16` | Docker bridge CIDR (`bip`). Merged into an existing `/etc/docker/daemon.json` (via `jq`/`python3`) — never clobbers other settings; skipped if `bip` is already defined |
 | `PROJECTS` | _(empty)_ | Space-separated list of Harbor projects to create |
+| `MGMT_IP` | _(first `hostname -I` token)_ | Host IP used in the certificate SAN and printed URLs. Set explicitly on multi-homed hosts |
+| `PURGE_DATA` | `false` | `uninstall-harbor` only: `true` removes `/data` entirely. Default removes only the Harbor-created subpaths — safe on shared `/data` mounts |
 
 ### Certificate Configuration
 
@@ -124,7 +132,7 @@ All variables have defaults and can be overridden by exporting them before runni
 | `STATE` | `MA` | Certificate state |
 | `LOCATION` | `BOSTON` | Certificate locality |
 | `ORGANIZATION` | `SELF` | Certificate organization |
-| `REGISTRY_COMMON_NAME` | `regsitry.edge.lab` | FQDN for the registry certificate |
+| `REGISTRY_COMMON_NAME` | `registry.edge.lab` | FQDN for the registry certificate (the historical `regsitry.edge.lab` typo default is fixed; existing installs are handled via the recorded install state, see below) |
 | `DURATION_DAYS` | `3650` | Certificate validity in days |
 
 ### Certificate Update Options
@@ -185,6 +193,12 @@ sudo USER_CERT_CRT=/path/to/server.crt \
 sudo bash install_harbor.sh uninstall-harbor
 ```
 
+Removes only the Harbor-created subpaths of `/data` by default. To remove `/data` entirely:
+
+```bash
+sudo PURGE_DATA=true bash install_harbor.sh uninstall-harbor
+```
+
 ### Prepare Offline Package
 
 ```bash
@@ -192,6 +206,37 @@ sudo bash install_harbor.sh offline-prep
 ```
 
 ## Special Considerations
+
+### Install-Time State (`/opt/harbor/.install-env`)
+
+The very first mutating step of `install-harbor` writes `/opt/harbor/.install-env` (mode 600, root-only).
+It records the values the install actually used — `REGISTRY_COMMON_NAME`, `HARBOR_PORT`,
+`HARBOR_VERSION`, the install date and user, the install-files directory, whether the installer added
+the docker group membership, and the CA certificate fingerprint. **No passwords are ever stored in it.**
+
+`uninstall-harbor` and `update-certificates` consume this file, so they operate on what was actually
+installed instead of whatever the current environment defaults to. Precedence when resolving a value:
+
+1. Variable explicitly set in the environment for this run
+2. Value recorded in `/opt/harbor/.install-env`
+3. Script default
+
+This means `sudo bash install_harbor.sh update-certificates` (with no variables) renews certificates for
+the CN and port you installed with — you no longer have to re-pass `REGISTRY_COMMON_NAME` on every
+maintenance command.
+
+### CA Reuse on Re-Install and Certificate Renewal
+
+Certificate generation is split into CA generation and server-certificate generation. The CA pair
+(`ca.crt`/`ca.key`) is generated **only when none exists** in `/opt/harbor/certs/`. Re-running
+`install-harbor` or `update-certificates` (`NEW_CERT_GEN=1`) issues a fresh server certificate signed by
+the **existing** CA, so every remote client that already trusts the CA keeps working. To deliberately
+rotate the CA, remove `/opt/harbor/certs/ca.crt` and `ca.key` first (all clients must then re-trust the
+new CA). An incomplete CA (only one of the two files present) is a hard error, not a silent regeneration.
+
+Only `ca.crt` and the `.cert` client certificate are placed in `/etc/docker/certs.d/<FQDN>:<PORT>/` —
+the server private key does not belong there and is no longer copied (keys leaked there by older
+versions are cleaned up on the next `update-certificates` or `uninstall-harbor`).
 
 ### Running Behind a Proxy
 
@@ -207,7 +252,7 @@ docker compose -f /opt/harbor/docker-compose.yml up -d
 Clients pulling images must be able to resolve `REGISTRY_COMMON_NAME`. If DNS is not available, add an entry to `/etc/hosts` on each client:
 
 ```
-192.168.1.100  regsitry.edge.lab
+192.168.1.100  registry.edge.lab
 ```
 
 ### Trusting the Self-Signed CA on Clients
@@ -236,7 +281,23 @@ Harbor stores all registry data under `/data` and configuration under `/opt/harb
 
 ### Changing the Admin Password
 
-The `HARBOR_PASSWORD` variable only sets the initial password during first installation. Change it through the Harbor web UI after deployment. Subsequent reinstalls will not update an existing password stored in the Harbor database under `/data`.
+The `HARBOR_PASSWORD` variable only sets the initial password during first installation. Change it through the Harbor web UI after deployment. Subsequent reinstalls will not update an existing password stored in the Harbor database under `/data` — the installer detects this, prints an explicit notice, and the final banner reports that the existing password remains in effect rather than echoing the ignored new one. If project auto-creation then fails with HTTP 401, the install exits non-zero with the same explanation.
+
+### Uninstall Scope
+
+`uninstall-harbor` removes: the Harbor containers and `harbor-docker.service` (including a
+`daemon-reload`/`reset-failed`), the `goharbor/*` images, `/opt/harbor` (config, certs, `.install-env`),
+`/var/log/harbor`, the install-files directory at its **recorded** path (works from any cwd), the
+`/etc/docker/certs.d/<FQDN>:<PORT>` entry for the recorded CN/port, and the docker group membership —
+only when the installer added it. For installs made before `.install-env` existed, a fallback sweep
+removes exactly those `/etc/docker/certs.d/*` entries whose `ca.crt` byte-matches the installed Harbor CA.
+
+`/data` handling: by default only the Harbor-created subpaths are removed (`ca_download`, `database`,
+`job_logs`, `redis`, `registry`, `secret`, `trivy-adapter`, `chart_storage`) so a shared `/data` mount is
+never destroyed. Set `PURGE_DATA=true` to remove `/data` entirely.
+
+Docker itself, `/etc/docker/daemon.json`, and the Docker repo configuration are intentionally **not**
+removed.
 
 ### Systemd Service
 
@@ -250,7 +311,9 @@ sudo systemctl stop harbor-docker.service
 
 ### Certificate Update Behavior
 
-The `update-certificates` command stops Harbor, replaces certificates, regenerates `harbor.yml`, and restarts the service. This causes a brief outage. The command requires either `NEW_CERT_GEN=1` or all three `USER_CERT_*` / `USER_CA_CRT` variables to be set; otherwise it exits with an error. User-supplied certificates must chain to the provided CA and are validated with `openssl verify` before installation.
+The `update-certificates` command stops Harbor, replaces certificates, regenerates `harbor.yml` (using the recorded install-time CN/port and preserving the running install's admin/DB passwords unless explicitly re-passed), runs Harbor's `prepare` so nginx actually picks up the new certificate, and restarts the stack via `harbor-docker.service`. This causes a brief outage. It then **verifies** with `openssl s_client` that the certificate being served matches the one on disk (SHA256 fingerprint) and exits non-zero if it does not — success output means the new certificate is genuinely live.
+
+The command requires either `NEW_CERT_GEN=1` or all three `USER_CERT_*` / `USER_CA_CRT` variables to be set; otherwise it exits with an error. With `NEW_CERT_GEN=1` the existing CA is reused (see [CA Reuse](#ca-reuse-on-re-install-and-certificate-renewal)). User-supplied certificates must chain to the provided CA and are validated with `openssl verify` before installation.
 
 ## File Layout
 
@@ -259,21 +322,22 @@ After installation, the script creates the following structure:
 ```
 <working-directory>/
   harbor-install-files/
-    certs/                    # Generated or user-supplied certificates
-      ca.crt, ca.key
-      <FQDN>.crt, <FQDN>.cert, <FQDN>.key
     apt-packages/             # install_packages.sh helper
     harbor-offline-installer-v<VERSION>.tgz
-    read_this_crumb.txt       # Post-install summary
+    read_this_crumb.txt       # Post-install summary (mode 600, contains no credentials)
 
 /opt/harbor/                  # Harbor application
-  harbor.yml                  # Harbor configuration
+  .install-env                # Recorded install-time state (mode 600, no secrets)
+  harbor.yml                  # Harbor configuration (mode 600 - carries passwords)
   docker-compose.yml          # Docker Compose file (from installer)
+  certs/                      # Generated or user-supplied certificates
+    ca.crt, ca.key
+    <FQDN>.crt, <FQDN>.cert, <FQDN>.key, <FQDN>-fullchain.crt
 
 /data/                        # Harbor persistent data
   ca_download/ca.crt          # CA cert available for client download
 
-/etc/docker/certs.d/<FQDN>:<PORT>/   # Docker client trust store
+/etc/docker/certs.d/<FQDN>:<PORT>/   # Docker client trust store (<FQDN>.cert + ca.crt only)
 /etc/systemd/system/harbor-docker.service
 ```
 
@@ -356,14 +420,14 @@ openssl x509 -inform PEM -in $CERT_DIR/$FQDN.crt -out $CERT_DIR/$FQDN.cert
 FQDN="registry.example.com"
 PORT=443
 
+# Only client trust material belongs in certs.d - never the private key
 mkdir -p /etc/docker/certs.d/$FQDN:$PORT
 cp $CERT_DIR/$FQDN.cert /etc/docker/certs.d/$FQDN:$PORT/
-cp $CERT_DIR/$FQDN.key  /etc/docker/certs.d/$FQDN:$PORT/
-cp $CERT_DIR/ca.crt      /etc/docker/certs.d/$FQDN:$PORT/
+cp $CERT_DIR/ca.crt     /etc/docker/certs.d/$FQDN:$PORT/
 
 # Make CA available for client download
 mkdir -p /data/ca_download
-cp $CERT_DIR/$FQDN.crt /data/ca_download/ca.crt
+cp $CERT_DIR/ca.crt /data/ca_download/ca.crt
 
 systemctl restart docker
 ```
@@ -409,12 +473,10 @@ After=docker.service systemd-networkd.service systemd-resolved.service
 Requires=docker.service
 
 [Service]
-Type=forking
-Restart=on-failure
-RestartSec=5
+Type=oneshot
+RemainAfterExit=yes
 ExecStart=/usr/bin/docker compose -f /opt/harbor/docker-compose.yml up -d
 ExecStop=/usr/bin/docker compose -f /opt/harbor/docker-compose.yml down
-RemainAfterExit=true
 
 [Install]
 WantedBy=multi-user.target
