@@ -36,6 +36,9 @@
   value is now refused.
 - **An empty variable counts as not set,** so `HARBOR_PORT=` can't move an install to the defaults.
 - **Special characters in passwords** no longer break `harbor.yml`, the API check or the read-back.
+- **A stale nginx no longer fails the install with a misleading 401.** On a slow host Harbor's core can crash once on first
+  boot, come back on a new address, and leave nginx sending API calls to another container. The installer now spots this
+  and restarts nginx.
 - **Air-gapped bundles include `curl`,** which the API check needs. A bundle and host with neither now fail at preflight
   rather than after a full install.
 - README: `.cert` doesn't go in `certs.d`. The manual steps in Appendix A created the "missing key" failure.

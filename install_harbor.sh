@@ -270,6 +270,8 @@ function update_certificates {
   fi
   run_step verify_served_certificate
   discard_cert_snapshot
+  # The certificates are right by now, so a slow API is worth a warning rather than a rollback
+  wait_for_harbor_api || echo "WARNING: Harbor's API isn't answering yet. Check with: curl -k https://$mgmt_ip:$HARBOR_PORT/api/v2.0/ping"
   # Display new certificate expiry
   local cert_expiry
   cert_expiry=$(openssl x509 -noout -enddate -in "$certs_dir/$REGISTRY_COMMON_NAME.crt" 2>/dev/null | cut -d= -f2)
@@ -1074,6 +1076,7 @@ function rollback_cert_update () {
   for ((attempt = 1; attempt <= 36; attempt++)); do
     code=$(curl -sk -m 5 -o /dev/null -w '%{http_code}' "https://$mgmt_ip:$HARBOR_PORT/api/v2.0/ping" || true)
     [[ "$code" == "200" ]] && break
+    heal_stale_proxy >&2
     sleep 5
   done
   if [[ "$code" == "200" ]]; then
@@ -1295,6 +1298,27 @@ JSON
   echo "  Created administrator '$HARBOR_USERNAME'."
 }
 
+# Harbor's core can crash once on first boot while its database is still starting, then come back on a new address.
+# Another container can take the old one, and nginx keeps sending API calls to it, so they all get that container's 401.
+# Restarting nginx fixes it. This only acts when core answers directly and the same call through nginx doesn't.
+function heal_stale_proxy () {
+  [[ "$(docker exec harbor-core curl -s -m 5 http://localhost:8080/api/v2.0/ping 2>/dev/null)" == "Pong" ]] || return 0
+  [[ "$(curl -sk -m 5 "https://$mgmt_ip:$HARBOR_PORT/api/v2.0/ping" 2>/dev/null)" != "Pong" ]] || return 0
+  echo "  nginx is sending API calls to the wrong container, because Harbor's core moved while starting. Restarting nginx..."
+  docker restart nginx >/dev/null 2>&1 || true
+}
+
+# wait_for_harbor_api: the API answers through nginx within HARBOR_API_WAIT_SEC.
+function wait_for_harbor_api () {
+  local attempt max_attempts=$((HARBOR_API_WAIT_SEC / 5))
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    [[ "$(curl -sk -m 5 "https://$mgmt_ip:$HARBOR_PORT/api/v2.0/ping" 2>/dev/null)" == "Pong" ]] && return 0
+    heal_stale_proxy
+    sleep 5
+  done
+  return 1
+}
+
 create_harbor_projects() {
     local wait_seconds=5
     local max_attempts=$((HARBOR_API_WAIT_SEC / wait_seconds))
@@ -1331,6 +1355,7 @@ create_harbor_projects() {
         fi
 
         echo "  Attempt $attempt/$max_attempts: Harbor API not ready (Status: $health_status). Retrying in ${wait_seconds}s..."
+        heal_stale_proxy
         sleep $wait_seconds
         ((attempt++))
     done

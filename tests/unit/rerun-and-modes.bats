@@ -235,3 +235,36 @@ unchanged_host() { # a fake install that matches the request
   gen_harbor_yml
   ! harbor_unchanged
 }
+proxy() { # proxy <what core says directly> <what comes back through nginx>
+  export CORE_BODY=$1 NGINX_BODY=$2
+  mgmt_ip=10.0.0.5; HARBOR_PORT=443
+  stub docker 'case "$1" in exec) printf "%s" "$CORE_BODY" ;; esac'
+  stub curl 'printf "%s" "$NGINX_BODY"'
+}
+@test "H13: core answers and nginx doesn't: restart nginx" {
+  proxy Pong '{"code":10011,"message":"unauthorized"}'
+  run heal_stale_proxy
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"wrong container"* ]]
+  called 'docker restart nginx'
+}
+@test "H13: nginx is fine: leave it alone" {
+  proxy Pong Pong
+  heal_stale_proxy
+  ! called 'docker restart'
+}
+@test "H13: core isn't up yet: leave nginx alone" {
+  proxy '' ''
+  heal_stale_proxy
+  ! called 'docker restart'
+}
+@test "H13: wait_for_harbor_api heals, then gives up with a failure" {
+  proxy Pong nope
+  HARBOR_API_WAIT_SEC=5
+  stub sleep 'exit 0'
+  run wait_for_harbor_api
+  [ "$status" -eq 1 ]
+  called 'docker restart nginx'
+  proxy Pong Pong
+  wait_for_harbor_api
+}
