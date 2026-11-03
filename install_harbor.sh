@@ -33,6 +33,7 @@ HARBOR_API_WAIT_SEC=${HARBOR_API_WAIT_SEC:-60}
 HARBOR_FORCE_REDEPLOY=${HARBOR_FORCE_REDEPLOY:-false}
 # true = ignore a harbor-install-files/VERSION.txt left by offline-prep, and stay online
 HARBOR_FORCE_ONLINE=${HARBOR_FORCE_ONLINE:-false}
+HARBOR_ALLOW_DOWNGRADE=${HARBOR_ALLOW_DOWNGRADE:-false}
 # Optional Docker version, used when Docker isn't installed yet. The start of a version is enough.
 DOCKER_VERSION=${DOCKER_VERSION:-""}
 # Which install_packages.sh to fetch: a tag, branch or commit. The URL wins over the ref, and the checksum is optional.
@@ -98,6 +99,7 @@ function install_harbor {
     echo "  Run 'uninstall-harbor' first if you need a clean install with a new password."
     check_existing_db_password || exit 1
     preserve_existing_yml_passwords
+    check_downgrade || exit 1
   fi
   check_existing_ca || exit 1
   if harbor_unchanged; then
@@ -955,6 +957,31 @@ function yml_password () {
     dq_unescape "$line"
   else
     printf '%s' "$line"
+  fi
+}
+
+# running_harbor_version: from the containers, or else the record. Empty when neither says.
+function running_harbor_version () {
+  local image
+  image=$(docker inspect -f '{{.Config.Image}}' harbor-core 2>/dev/null || true)
+  if [[ "$image" == *:v* ]]; then
+    echo "${image##*:v}"
+  elif [[ -f "$install_env_file" ]]; then
+    sed -n 's/^HARBOR_VERSION=//p' "$install_env_file"
+  fi
+}
+
+# Harbor's database schema only moves forward: an older Harbor can't start on it, so its API never comes back.
+function check_downgrade () {
+  local current
+  [[ "$HARBOR_ALLOW_DOWNGRADE" == "true" ]] && return 0
+  current=$(running_harbor_version)
+  [[ -n "$current" && "$current" != "$HARBOR_VERSION" ]] || return 0
+  if [[ "$(printf '%s\n%s\n' "$current" "$HARBOR_VERSION" | sort -V | head -1)" == "$HARBOR_VERSION" ]]; then
+    echo "Error: Harbor $current is installed, and HARBOR_VERSION=$HARBOR_VERSION is older."
+    echo "  An older Harbor can't start on a newer database, so this would leave it down."
+    echo "  To go back, restore a backup of $data_dir. HARBOR_ALLOW_DOWNGRADE=true skips this check."
+    return 1
   fi
 }
 

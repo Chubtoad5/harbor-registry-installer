@@ -36,6 +36,8 @@
   value is now refused.
 - **An empty variable counts as not set,** so `HARBOR_PORT=` can't move an install to the defaults.
 - **Special characters in passwords** no longer break `harbor.yml`, the API check or the read-back.
+- **A downgrade is refused before anything changes.** 2.15.0 to 2.14.1 left the API at 502 and the stack down, because an
+  older Harbor can't start on a newer database. `HARBOR_ALLOW_DOWNGRADE=true` skips the check.
 - **A stale nginx no longer fails the install with a misleading 401.** On a slow host Harbor's core can crash once on first
   boot, come back on a new address, and leave nginx sending API calls to another container. The installer now spots this
   and restarts nginx.

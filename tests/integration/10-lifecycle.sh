@@ -72,6 +72,12 @@ inst HARBOR_VERSION=2.99.0 && bad "a bad version exited 0" || ok "a bad version 
 [ "$K" = "$(keyhash)" ] && ok "key untouched" || bad "key replaced"
 [ "$S" = "$(started)" ] && ok "stack untouched" || bad "stack restarted"
 
+echo "=== HC2: a downgrade changes nothing"
+K=$(keyhash); S=$(started)
+inst HARBOR_VERSION="$OLD" && bad "a downgrade exited 0" || ok "a downgrade is refused"
+grep -q 'older' "$W/o" && ok "it says why" || bad "no reason given"
+[ "$K" = "$(keyhash)" ] && [ "$S" = "$(started)" ] && ok "nothing changed" || bad "something changed"
+
 echo "=== H4: a failing prepare rolls back"
 K=$(keyhash); CRT=$(sha256sum "/opt/harbor/certs/$CN.crt" | cut -c1-16)
 cp -a /opt/harbor/prepare /opt/harbor/prepare.real; printf '#!/bin/bash\nexit 1\n' > /opt/harbor/prepare
@@ -172,6 +178,21 @@ ip route add default via "$GW" dev "$DEV"
 command -v curl >/dev/null && ok "H8: curl was installed from the bundle" || bad "H8: no curl after the install"
 [ -e /usr/bin/curl.off ] && { [ -e /usr/bin/curl ] || mv /usr/bin/curl.off /usr/bin/curl; rm -f /usr/bin/curl.off; }
 wait_api; api projects | jq -r '.[].name' | grep -qx airgap && ok "the project exists" || bad "the project is missing"
+./install_harbor.sh uninstall-harbor >/dev/null 2>&1
+
+echo "=== H0, air-gapped: a new bundle over an older install"
+cd "$W/o2" || exit 1
+env HARBOR_FORCE_ONLINE=true REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$OLD" PROJECTS=demo ./install_harbor.sh install-harbor >"$W/o" 2>&1 && ok "install $OLD" || { bad "install $OLD"; tail_o; }
+wait_api
+docker login "$CN:443" -u admin -p Harbor12345 >/dev/null 2>&1
+docker tag alpine:3.20 "$CN:443/demo/alpine:3.20"; docker push -q "$CN:443/demo/alpine:3.20" >/dev/null && ok "pushed an image" || bad "push failed"
+cd "$W/o3" || exit 1
+ip route del default
+if env REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$NEW" PROJECTS=demo ./install_harbor.sh install-harbor >"$W/o" 2>&1; then ok "upgraded with no route out"; else bad "the air-gapped upgrade failed"; tail_o; fi
+ip route add default via "$GW" dev "$DEV"
+wait_api
+api systeminfo | jq -r .harbor_version | grep -q "v$NEW" && ok "running $NEW" || bad "running $(api systeminfo | jq -r .harbor_version)"
+docker rmi -f "$CN:443/demo/alpine:3.20" >/dev/null 2>&1; docker pull -q "$CN:443/demo/alpine:3.20" >/dev/null && ok "the image survived" || bad "the image is gone"
 ./install_harbor.sh uninstall-harbor >/dev/null 2>&1
 echo "=== exit $fail"
 exit $fail

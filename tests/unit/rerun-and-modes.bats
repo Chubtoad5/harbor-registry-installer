@@ -268,3 +268,43 @@ proxy() { # proxy <what core says directly> <what comes back through nginx>
   proxy Pong Pong
   wait_for_harbor_api
 }
+downgrade_host() { # downgrade_host <running version or empty> [recorded version]
+  install_env_file=$(mktemp)
+  export RUNNING_IMAGE=${1:+goharbor/harbor-core:v$1}
+  stub docker 'case "$1" in inspect) [ -n "$RUNNING_IMAGE" ] && echo "$RUNNING_IMAGE" || exit 1 ;; esac'
+  [ -n "${2:-}" ] && echo "HARBOR_VERSION=$2" > "$install_env_file"
+  return 0
+}
+@test "HC2: an older version is refused, and an upgrade or the same version isn't" {
+  downgrade_host 2.15.0
+  HARBOR_VERSION=2.14.1
+  run check_downgrade
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"older"* && "$output" == *"HARBOR_ALLOW_DOWNGRADE=true"* ]]
+  HARBOR_VERSION=2.15.0; check_downgrade
+  HARBOR_VERSION=2.16.0; check_downgrade
+}
+@test "HC2: versions compare as versions, not as text" {
+  downgrade_host 2.9.0
+  HARBOR_VERSION=2.10.0; check_downgrade
+  downgrade_host 2.10.0
+  HARBOR_VERSION=2.9.0
+  run check_downgrade
+  [ "$status" -eq 1 ]
+}
+@test "HC2: a stopped stack falls back to the record" {
+  downgrade_host "" 2.15.0
+  HARBOR_VERSION=2.14.1
+  run check_downgrade
+  [ "$status" -eq 1 ]
+}
+@test "HC2: nothing known means nothing to compare" {
+  downgrade_host ""
+  HARBOR_VERSION=2.14.1
+  check_downgrade
+}
+@test "HC2: HARBOR_ALLOW_DOWNGRADE skips the check" {
+  downgrade_host 2.15.0
+  HARBOR_VERSION=2.14.1; HARBOR_ALLOW_DOWNGRADE=true
+  check_downgrade
+}
