@@ -14,6 +14,23 @@ bundle_tar() { # bundle_tar <names of fake packages...>
   for n in "$@"; do touch "$d/offline-packages/$n"; done
   tar -czf "$base_dir/harbor-install-files/apt-packages/offline-packages.tar.gz" -C "$d" offline-packages
 }
+@test "H14: an upgrade removes the old image archive, so upstream's install.sh can load the new one" {
+  mkdir -p /opt/harbor "$base_dir/t/harbor"
+  touch /opt/harbor/harbor.v2.14.1.tar.gz "$base_dir/t/harbor/harbor.v2.15.0.tar.gz"
+  # The same test as upstream's: with two files this is an error, and the load is skipped
+  cat > "$base_dir/t/harbor/install.sh" <<'S'
+#!/bin/bash
+cd /opt/harbor || exit 1
+if [ -f harbor*.tar.gz ]; then echo "loading $(ls harbor*.tar.gz)" >> "$STUB_LOG"; fi
+S
+  chmod +x "$base_dir/t/harbor/install.sh"
+  HARBOR_VERSION=2.15.0
+  tar -czf "$base_dir/harbor-install-files/harbor-offline-installer-v2.15.0.tgz" -C "$base_dir/t" harbor
+  run_harbor_installer >/dev/null 2>&1
+  called 'loading harbor.v2.15.0.tar.gz'
+  [ ! -e /opt/harbor/harbor.v2.14.1.tar.gz ]
+  rm -f /opt/harbor/harbor.v*.tar.gz /opt/harbor/install.sh
+}
 @test "H12: VERSION.txt selects bundle mode, and HARBOR_FORCE_ONLINE overrides it" {
   ! bundle_mode
   touch "$base_dir/harbor-install-files/VERSION.txt"

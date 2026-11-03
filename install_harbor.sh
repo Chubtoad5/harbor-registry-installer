@@ -787,6 +787,9 @@ function prefetch_harbor_installer() {
 
 function run_harbor_installer() {
   local installer_tgz="$base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz"
+  # An upgrade finds the old version's image archive here. Upstream's install.sh tests 'harbor*.tar.gz', which can't
+  # take two files, so it would skip loading the images: they'd come from Docker Hub, or in an air gap, not at all.
+  rm -f /opt/harbor/harbor.v*.tar.gz
   tar xzvf "$installer_tgz" -C /opt/ || return 1
   /opt/harbor/install.sh || return 1
   echo "  creating crumb file..."

@@ -37,6 +37,9 @@
   value is now refused.
 - **An empty variable counts as not set,** so `HARBOR_PORT=` can't move an install to the defaults.
 - **Special characters in passwords** no longer break `harbor.yml`, the API check or the read-back.
+- **An upgrade now loads its images from the installer.** The old version's image archive was still in `/opt/harbor`, so
+  upstream's `install.sh` skipped `docker load`. Connected, the images quietly came from Docker Hub. **Air-gapped, a new bundle
+  over an older install failed,** and left the old version running.
 - **A downgrade is refused before anything changes.** 2.15.0 to 2.14.1 left the API at 502 and the stack down, because an
   older Harbor can't start on a newer database. `HARBOR_ALLOW_DOWNGRADE=true` skips the check.
 - **A stale nginx no longer fails the install with a misleading 401.** On a slow host Harbor's core can crash once on first

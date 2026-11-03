@@ -39,6 +39,7 @@ docker pull -q alpine:3.20 >/dev/null; docker tag alpine:3.20 "$CN:443/demo/alpi
 K=$(keyhash); C=$(sha256sum /opt/harbor/certs/ca.key | cut -c1-16); D=$(dockerts)
 stage "$NEW"
 if env SUDO_USER=cisudo REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$NEW" PROJECTS=demo ./install_harbor.sh install-harbor >"$W/o" 2>&1; then ok "upgrade to $NEW"; else bad "upgrade to $NEW"; tail_o; fi
+grep -q 'loading Harbor images' "$W/o" && ok "H14: the upgrade loaded its images from the installer" || bad "H14: the upgrade skipped loading its images"
 wait_api
 api systeminfo | jq -r .harbor_version | grep -q "v$NEW" && ok "H0: running $NEW" || bad "H0: running $(api systeminfo | jq -r .harbor_version)"
 docker rmi -f "$CN:443/demo/alpine:3.20" >/dev/null 2>&1; docker pull -q "$CN:443/demo/alpine:3.20" >/dev/null && ok "H0: the image survived" || bad "H0: the image is gone"
