@@ -7,7 +7,7 @@
   step failed with a 401, and with no `PROJECTS` the install exited 0 with a name that couldn't log in. Harbor can't rename
   `admin`, so another name now becomes a second system administrator with the same password, and `admin` stays. It needs a
   password meeting Harbor's rule for new users. `HARBOR_USER_EMAIL` sets its email.
-- **`ROTATE_CA=true`** replaces the CA. `CA_EXPIRY_WARN_DAYS` sets when a warning appears.
+- **`ROTATE_CA=true`** replaces the CA, as `ca.crt.old-<stamp>`. A failed rotation puts the old one back. `CA_EXPIRY_WARN_DAYS` sets when a warning appears.
 - **`HARBOR_FORCE_ONLINE=true`** ignores a `VERSION.txt` left behind by `offline-prep`.
 - **`HARBOR_FORCE_REDEPLOY=true`**, `CERT_RENEW_BEFORE_DAYS` and `HARBOR_API_WAIT_SEC`.
 - **`DOCKER_VERSION`, `INSTALL_PACKAGES_REF`, `INSTALL_PACKAGES_URL` and `INSTALL_PACKAGES_SHA256`.**
@@ -21,7 +21,7 @@
 - **A redeploy keeps the server key while it's still good,** and Docker restarts only when `daemon.json` changed on a
   Docker that was already running.
 - **A re-run no longer moves Docker,** because `install_packages.sh` is now called with `--no-upgrade` once Docker is
-  installed. Set `DOCKER_VERSION` to change it on purpose.
+  installed. `DOCKER_VERSION` applies only to a new install or a bundle, so change a running Docker by hand.
 - `install_packages.sh` now defaults to tag `v1.1.0` rather than `main`. **Release install-packages v1.1.0 first,** or
   the default won't resolve. A cached copy from another ref is fetched again.
 
