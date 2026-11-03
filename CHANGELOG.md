@@ -1,5 +1,45 @@
 # Changelog — harbor-registry-installer
 
+## v1.1.0 — 2026-11-03 — Day-2 fixes
+
+### Added
+- **`HARBOR_USERNAME` now works.** Any name other than `admin` used to fail with a 401 at the end of a full install.
+  Harbor can't rename `admin`, so another name now becomes a second system administrator with the same password, and
+  `admin` stays. It needs a password meeting Harbor's rule for new users. `HARBOR_USER_EMAIL` sets its email.
+- **`ROTATE_CA=true`** replaces the CA. `CA_EXPIRY_WARN_DAYS` sets when a warning appears.
+- **`HARBOR_FORCE_ONLINE=true`** ignores a `VERSION.txt` left behind by `offline-prep`.
+- **`HARBOR_FORCE_REDEPLOY=true`**, `CERT_RENEW_BEFORE_DAYS` and `HARBOR_API_WAIT_SEC`.
+- **`DOCKER_VERSION`, `INSTALL_PACKAGES_REF`, `INSTALL_PACKAGES_URL` and `INSTALL_PACKAGES_SHA256`.**
+- **`version`, and `SCRIPT_VERSION`.** `.install-env` records `INSTALLER_VERSION`.
+- **Tests:** `tests/unit`, `tests/contract` and `tests/integration`.
+
+### Changed
+- **An unchanged re-run now does nothing to the running stack.** No package changes, no new key, no Docker restart and
+  no redeploy. It only checks the API and adds new projects. **The first re-run after this release still redeploys
+  once,** because of how `harbor.yml` now quotes passwords.
+- **A redeploy keeps the server key while it's still good,** and Docker restarts only when `daemon.json` changed on a
+  Docker that was already running.
+- **A re-run no longer moves Docker,** because `install_packages.sh` is now called with `--no-upgrade` once Docker is
+  installed. Set `DOCKER_VERSION` to change it on purpose.
+- `install_packages.sh` now defaults to tag `v1.1.0` rather than `main`. **Release install-packages v1.1.0 first,** or
+  the default won't resolve. A cached copy from another ref is fetched again.
+
+### Fixed
+- **A failed upgrade no longer leaves `.install-env` naming a version that isn't running.** `HARBOR_VERSION` now changes
+  only once the install succeeds. The installer is fetched first, so a bad version fails with nothing changed.
+- **Uninstall removes a docker group membership it added,** even after a re-run. `DOCKER_GROUP_USERS` replaces the old
+  flag, and older records are still read.
+- **An expired CA stops the run** instead of issuing certificates no client accepts, and verification now checks the
+  chain as well as the fingerprint. A server certificate can't outlive its CA.
+- **A failed `update-certificates` restores the previous certificates and restarts Harbor** instead of leaving it down.
+- **A custom database password survives a bare re-run.** It used to become `root123`, which broke Harbor. A different
+  value is now refused.
+- **An empty variable counts as not set,** so `HARBOR_PORT=` can't move an install to the defaults.
+- **Special characters in passwords** no longer break `harbor.yml`, the API check or the read-back.
+- **Air-gapped bundles include `curl`,** which the API check needs. A bundle and host with neither now fail at preflight
+  rather than after a full install.
+- README: `.cert` doesn't go in `certs.d`. The manual steps in Appendix A created the "missing key" failure.
+
 ## 2026-09-09 — Idempotence release (feature/idempotence-phase2)
 
 Idempotence, certificate-lifecycle and uninstall-correctness pass. The installer now records

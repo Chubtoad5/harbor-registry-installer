@@ -2,14 +2,17 @@
 
 # This script contains functions for installing a Harbor registry on Ubuntu for storing container images
 
+SCRIPT_VERSION="1.1.0"
+
 # Record which variables the caller explicitly set BEFORE defaults are applied, so
 # recorded install-time values from .install-env can fill in unset variables without
-# ever overriding an explicit user choice (precedence: env > .install-env > default)
-user_set_registry_common_name=${REGISTRY_COMMON_NAME+x}
-user_set_harbor_port=${HARBOR_PORT+x}
-user_set_harbor_version=${HARBOR_VERSION+x}
-user_set_harbor_password=${HARBOR_PASSWORD+x}
-user_set_harbor_db_password=${HARBOR_DB_PASSWORD+x}
+# ever overriding an explicit user choice (precedence: env > .install-env > default).
+# Empty counts as not set, which matches the :- defaults below.
+user_set_registry_common_name=${REGISTRY_COMMON_NAME:+x}
+user_set_harbor_port=${HARBOR_PORT:+x}
+user_set_harbor_version=${HARBOR_VERSION:+x}
+user_set_harbor_password=${HARBOR_PASSWORD:+x}
+user_set_harbor_db_password=${HARBOR_DB_PASSWORD:+x}
 
 # --- User Defined Variables --- #
 DEBUG=${DEBUG:-1}
@@ -17,11 +20,25 @@ DEBUG=${DEBUG:-1}
 # Harbor configuration
 HARBOR_VERSION=${HARBOR_VERSION:-2.15.0}
 HARBOR_PORT=${HARBOR_PORT:-443}
+# A name other than admin becomes a second system administrator, because Harbor can't rename admin
 HARBOR_USERNAME=${HARBOR_USERNAME:-admin}
+HARBOR_USER_EMAIL=${HARBOR_USER_EMAIL:-""}
 HARBOR_PASSWORD=${HARBOR_PASSWORD:-Harbor12345}
 HARBOR_DB_PASSWORD=${HARBOR_DB_PASSWORD:-root123}
 DOCKER_BRIDGE_CIDR=${DOCKER_BRIDGE_CIDR:-"172.30.0.1/16"}
 PROJECTS=${PROJECTS:-""}
+# How long to wait for the Harbor API after (re)starting it
+HARBOR_API_WAIT_SEC=${HARBOR_API_WAIT_SEC:-60}
+# true = run the full install even when nothing has changed
+HARBOR_FORCE_REDEPLOY=${HARBOR_FORCE_REDEPLOY:-false}
+# true = ignore a harbor-install-files/VERSION.txt left by offline-prep, and stay online
+HARBOR_FORCE_ONLINE=${HARBOR_FORCE_ONLINE:-false}
+# Optional Docker version, used when Docker isn't installed yet. The start of a version is enough.
+DOCKER_VERSION=${DOCKER_VERSION:-""}
+# Which install_packages.sh to fetch: a tag, branch or commit. The URL wins over the ref, and the checksum is optional.
+INSTALL_PACKAGES_REF=${INSTALL_PACKAGES_REF:-"v1.1.0"}
+INSTALL_PACKAGES_URL=${INSTALL_PACKAGES_URL:-"https://raw.githubusercontent.com/Chubtoad5/install-packages/${INSTALL_PACKAGES_REF}/install_packages.sh"}
+INSTALL_PACKAGES_SHA256=${INSTALL_PACKAGES_SHA256:-""}
 # uninstall-harbor: 'true' removes /data entirely; default removes only the
 # Harbor-created subpaths (safe on shared /data mounts)
 PURGE_DATA=${PURGE_DATA:-false}
@@ -33,6 +50,11 @@ LOCATION=${LOCATION:-"BOSTON"}
 ORGANIZATION=${ORGANIZATION:-"SELF"}
 REGISTRY_COMMON_NAME=${REGISTRY_COMMON_NAME:-"registry.edge.lab"}
 DURATION_DAYS=${DURATION_DAYS:-"3650"}
+# Replace the CA. Every client must then trust the new one, so this never happens by itself.
+ROTATE_CA=${ROTATE_CA:-false}
+CA_EXPIRY_WARN_DAYS=${CA_EXPIRY_WARN_DAYS:-30}
+# On a re-run, keep a server certificate with more than this many days left
+CERT_RENEW_BEFORE_DAYS=${CERT_RENEW_BEFORE_DAYS:-30}
 
 # Update certificate options
 NEW_CERT_GEN=${NEW_CERT_GEN:-0}
@@ -48,7 +70,6 @@ os_release_version=""
 # First 'hostname -I' token by default; set MGMT_IP explicitly on multi-homed
 # hosts to control which IP lands in the certificate SAN and the printed URLs
 mgmt_ip=${MGMT_IP:-$(hostname -I | awk '{print $1}')}
-mgmt_if=$(ip a |grep "$(hostname -I |awk '{print $1}')" | awk '{print $NF}')
 user_name=${SUDO_USER:-$(whoami)}
 current_hostname=$(hostname)
 certs_dir="/opt/harbor/certs"
@@ -57,35 +78,57 @@ docker_certs_root="/etc/docker/certs.d"
 data_dir="/data"
 data_preexisting=0
 recorded_install_files_dir=""
-recorded_docker_group_added=""
-recorded_install_user=""
+recorded_docker_users=""
+docker_was_active=0
+bridge_changed=0
 
 #### --- Functions --- ###
 
 # --- Menu Functions --- #
 
 function install_harbor {
+  # Called directly rather than through run_step: at DEBUG=0 it would hide why the run stopped
+  check_passwords || exit 1
+  check_harbor_username || exit 1
   if [[ -d "$data_dir/database" ]]; then
     data_preexisting=1
     echo "  NOTE: Existing Harbor data found in $data_dir."
     echo "  HARBOR_PASSWORD is only applied on the very first install - the admin"
     echo "  password already stored in $data_dir remains in effect for this install."
     echo "  Run 'uninstall-harbor' first if you need a clean install with a new password."
+    check_existing_db_password || exit 1
+    preserve_existing_yml_passwords
   fi
-  run_step write_install_env
-  run_step install_docker_utility
-  run_step cert_gen
-  run_step harbor_cert_install
-  run_step gen_harbor_yml
-  run_step run_harbor_installer
-  run_step create_harbor_service
-  run_step create_harbor_projects
+  check_existing_ca || exit 1
+  if harbor_unchanged; then
+    echo "  No change: Harbor is running as requested. Skipping Docker, certificates and redeploy."
+    echo "  (HARBOR_FORCE_REDEPLOY=true runs the full install anyway.)"
+    run_step create_harbor_service
+    run_step create_harbor_projects
+  else
+    # Fetch first, so a bad version fails before anything has changed
+    run_step prefetch_harbor_installer
+    run_step write_install_env
+    run_step install_docker_utility
+    run_step cert_gen
+    run_step harbor_cert_install
+    run_step gen_harbor_yml
+    run_step run_harbor_installer
+    run_step create_harbor_service
+    run_step create_harbor_projects
+    run_step commit_install_version
+  fi
   echo "# ---  Harbor Install Completed! --- #"
   echo "  Harbor install and compose files are in /opt/harbor and /data directories"
   echo "  Harbor Version: $HARBOR_VERSION"
   echo "  URL: https://$mgmt_ip:$HARBOR_PORT"
   echo "  FQDN URL: https://$REGISTRY_COMMON_NAME:$HARBOR_PORT"
-  echo "  Username: $HARBOR_USERNAME"
+  if [[ "$HARBOR_USERNAME" == "admin" ]]; then
+    echo "  Username: admin"
+  else
+    echo "  Administrator: $HARBOR_USERNAME"
+    echo "  The built-in admin account also exists, with the same password. Change it in the UI if you don't want that."
+  fi
   if [[ $data_preexisting -eq 1 ]]; then
     echo "  Password: (unchanged - the password stored in $data_dir from the prior install remains in effect)"
   else
@@ -127,13 +170,14 @@ function uninstall_harbor {
   rm -f /etc/systemd/system/harbor-docker.service
   systemctl daemon-reload
   systemctl reset-failed harbor-docker.service 2>/dev/null || true
-  # Remove the docker group membership only when this installer added it
-  if [[ "$recorded_docker_group_added" == "1" && -n "$recorded_install_user" ]]; then
-    if id -nG "$recorded_install_user" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
-      gpasswd -d "$recorded_install_user" docker > /dev/null 2>&1 || true
-      echo "  Removed $recorded_install_user from the docker group (membership was added by the installer)"
+  # Remove the docker group membership only for users this installer added
+  local group_user
+  for group_user in $recorded_docker_users; do
+    if id -nG "$group_user" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+      gpasswd -d "$group_user" docker > /dev/null 2>&1 || true
+      echo "  Removed $group_user from the docker group (membership was added by the installer)"
     fi
-  fi
+  done
   rm -rf /opt/harbor
   echo "  Uninstallation completed..."
 }
@@ -188,7 +232,15 @@ function update_certificates {
     exit 1
   fi
   load_install_env
+  check_passwords || exit 1
   preserve_existing_yml_passwords
+  # A user-supplied CA replaces this one, and is a way out of an expired one, so only self-signed renewals check it
+  if [[ "$NEW_CERT_GEN" -eq 1 ]]; then
+    check_existing_ca || exit 1
+  fi
+  # Anything from here on can be rolled back, and the snapshot has to come first:
+  # new_cert_check already overwrites the certificate files
+  run_step snapshot_for_cert_update
   # Validate + stage the new cert material BEFORE stopping anything: a bad
   # user-supplied chain (or failed generation) must abort with the running
   # stack untouched, not leave the registry down
@@ -217,6 +269,7 @@ function update_certificates {
     fi
   fi
   run_step verify_served_certificate
+  discard_cert_snapshot
   # Display new certificate expiry
   local cert_expiry
   cert_expiry=$(openssl x509 -noout -enddate -in "$certs_dir/$REGISTRY_COMMON_NAME.crt" 2>/dev/null | cut -d= -f2)
@@ -274,8 +327,11 @@ function preflight_checks () {
   case "$1" in
     install)
       required_cmds=(tar openssl)
-      # Online mode needs to fetch install_packages.sh and the Harbor installer
-      [[ -f "$base_dir/harbor-install-files/VERSION.txt" ]] || required_cmds+=(curl)
+      # Every mode needs curl: online to fetch, and all of them for the API check at the end.
+      # A bundle can bring its own, but an older bundle can't.
+      if ! bundle_mode || ! bundle_has_curl; then
+        required_cmds+=(curl)
+      fi
       ;;
     offline-prep)
       required_cmds=(tar curl)
@@ -297,6 +353,26 @@ function select_docker_packages () {
             DOCKER_PACKAGES=(docker docker-compose)
             ;;
     esac
+    # Optional pin, in install_packages.sh's name=version form
+    local i pkg
+    if [[ -n "$DOCKER_VERSION" ]]; then
+      for i in "${!DOCKER_PACKAGES[@]}"; do
+        pkg=${DOCKER_PACKAGES[$i]}
+        case "$pkg" in
+          docker-ce|docker-ce-cli|docker) DOCKER_PACKAGES[i]="$pkg=$DOCKER_VERSION" ;;
+        esac
+      done
+    fi
+}
+
+# Bundle mode: offline-prep's VERSION.txt is present, and nobody asked to stay online
+function bundle_mode () {
+  [[ -f "$base_dir/harbor-install-files/VERSION.txt" && "${HARBOR_FORCE_ONLINE,,}" != "true" ]]
+}
+
+function bundle_has_curl () {
+  local archive="$base_dir/harbor-install-files/apt-packages/offline-packages.tar.gz"
+  [[ -f "$archive" ]] && tar -tzf "$archive" 2>/dev/null | grep -qE '/curl[-_][0-9]'
 }
 
 function ensure_dnf_config_manager () {
@@ -366,21 +442,37 @@ function add_docker_repo () {
     esac
 }
 
-function install_packages_check () {
-    # Refetch when the cached copy is missing or zero-byte (a previously failed
-    # download must never be reused)
-    local dest="$base_dir/harbor-install-files/apt-packages/install_packages.sh"
-    if [[ ! -s "$dest" ]]; then
-        mkdir -p "$base_dir/harbor-install-files/apt-packages"
-        rm -f "$dest"
-        echo "  Downloading install_packages.sh..."
-        if ! curl -fsSL https://github.com/Chubtoad5/install-packages/raw/refs/heads/main/install_packages.sh -o "$dest"; then
-            echo "Error: Failed to download install_packages.sh."
-            rm -f "$dest"
-            return 1
-        fi
-        chmod +x "$dest"
+# fetch_helper <dest> <url> <ref> [sha256]: a cached copy from another ref, or with no record, is fetched again
+function fetch_helper () {
+    local dest=$1 url=$2 ref=$3 sha=${4:-} ref_file
+    ref_file="$(dirname "$dest")/.$(basename "$dest").ref"
+    if [[ -s "$dest" && "$(cat "$ref_file" 2>/dev/null)" == "$ref" ]]; then
+        return 0
     fi
+    echo "  Downloading $(basename "$dest") ($ref)..."
+    if ! curl -fsSL "$url" -o "$dest.tmp"; then
+        rm -f "$dest.tmp"
+        echo "Error: Failed to download $url"
+        return 1
+    fi
+    if [[ -n "$sha" ]] && ! echo "$sha  $dest.tmp" | sha256sum -c --status; then
+        rm -f "$dest.tmp"
+        echo "Error: $(basename "$dest") doesn't match its checksum."
+        return 1
+    fi
+    mv "$dest.tmp" "$dest"
+    chmod +x "$dest"
+    printf '%s\n' "$ref" > "$ref_file"
+}
+
+function install_packages_check () {
+    local dest="$base_dir/harbor-install-files/apt-packages/install_packages.sh"
+    mkdir -p "$base_dir/harbor-install-files/apt-packages"
+    # A bundle uses the copy it brought, and an air-gapped run must never reach the download
+    if bundle_mode && [[ -s "$dest" ]]; then
+        return 0
+    fi
+    fetch_helper "$dest" "$INSTALL_PACKAGES_URL" "$INSTALL_PACKAGES_REF" "$INSTALL_PACKAGES_SHA256"
 }
 
 function ensure_el_kernel_modules() {
@@ -397,7 +489,7 @@ function ensure_el_kernel_modules() {
     local kver
     kver=$(uname -r)
     echo "  Kernel module xt_addrtype is unavailable (the docker daemon requires it)."
-    if [[ -f "$base_dir/harbor-install-files/apt-packages/offline-packages.tar.gz" ]]; then
+    if bundle_mode && [[ -f "$base_dir/harbor-install-files/apt-packages/offline-packages.tar.gz" ]]; then
         echo "Error: install kernel-modules-extra for the running kernel from local media"
         echo "  (dnf install kernel-modules-extra-$kver), then re-run this script."
         return 1
@@ -423,17 +515,30 @@ function ensure_el_kernel_modules() {
     echo "  xt_addrtype kernel module loaded."
 }
 
+# A bundled helper may predate these flags, and an old script rejects them
+function helper_flags () {
+    if ./install_packages.sh --version >/dev/null 2>&1 && command -v docker >/dev/null 2>&1; then
+        # Docker is already here: don't move it just because Harbor is being re-run
+        echo "--no-upgrade"
+    fi
+}
+
 function install_docker_utility() {
     install_packages_check || return 1
+    systemctl is-active --quiet docker && docker_was_active=1
     create_bridge_json || return 1
     cd "$base_dir/harbor-install-files/apt-packages" || return 1
-    if [[ -f "$base_dir/harbor-install-files/apt-packages/offline-packages.tar.gz" ]]; then
-        ./install_packages.sh offline "${DOCKER_PACKAGES[@]}" || { cd "$base_dir"; return 1; }
+    local flags=() packages=("${DOCKER_PACKAGES[@]}")
+    read -r -a flags <<< "$(helper_flags)"
+    if bundle_mode && [[ -f "$base_dir/harbor-install-files/apt-packages/offline-packages.tar.gz" ]]; then
+        bundle_has_curl && packages+=(curl)
+        ./install_packages.sh offline "${flags[@]}" "${packages[@]}" || { cd "$base_dir" || true; return 1; }
     else
-        ensure_docker_repo || { cd "$base_dir"; return 1; }
-        ./install_packages.sh online "${DOCKER_PACKAGES[@]}" || { cd "$base_dir"; return 1; }
+        ensure_docker_repo || { cd "$base_dir" || true; return 1; }
+        ./install_packages.sh online "${flags[@]}" "${packages[@]}" || { cd "$base_dir" || true; return 1; }
     fi
     cd "$base_dir" || return 1
+    require_cmds curl
     if ! command -v docker &> /dev/null; then
         echo "Error: Docker installation failed."
         return 1
@@ -447,13 +552,18 @@ function install_docker_utility() {
         echo "Error: The docker service is not active after 'systemctl enable --now docker'."
         return 1
     fi
-    # Record whether this run added the docker group membership so uninstall
-    # removes only what the installer added
+    # Only a changed daemon.json on a Docker that was already running needs a restart.
+    # Docker reads certs.d per connection, so the CA copy never does.
+    if [[ $docker_was_active -eq 1 && $bridge_changed -eq 1 ]]; then
+        echo "  daemon.json changed: restarting Docker"
+        systemctl restart docker || { echo "Error: Failed to restart docker."; return 1; }
+    fi
+    # Record who this installer added to the docker group, so uninstall removes only those
     if id -nG "$user_name" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
         echo "  User $user_name is already in the docker group"
     else
         usermod -aG docker "$user_name"
-        set_install_env_value DOCKER_GROUP_ADDED 1
+        record_docker_group_user "$user_name"
     fi
 }
 
@@ -490,6 +600,7 @@ function create_bridge_json () {
           return 0
       fi
       rm -f "$backup"
+      bridge_changed=1
       echo "  Merged bip: $DOCKER_BRIDGE_CIDR into existing /etc/docker/daemon.json"
   else
       cat <<EOF | tee /etc/docker/daemon.json > /dev/null
@@ -497,7 +608,39 @@ function create_bridge_json () {
   "bip": "$DOCKER_BRIDGE_CIDR"
 }
 EOF
+      bridge_changed=1
       echo "  Created /etc/docker/daemon.json with bip: $DOCKER_BRIDGE_CIDR"
+  fi
+}
+
+# Whole days until a certificate expires. Negative once it has.
+function cert_days_left () {
+  local end
+  end=$(openssl x509 -noout -enddate -in "$1" 2>/dev/null | cut -d= -f2) || return 1
+  echo $(( ($(date -d "$end" +%s) - $(date +%s)) / 86400 ))
+}
+
+# An expired CA signs certificates no client will accept, so it stops the run, before anything changes.
+# Replacing it breaks every client's trust, so that only ever happens on request.
+function check_existing_ca () {
+  local ca="$certs_dir/ca.crt" stamp left
+  if [[ "${ROTATE_CA,,}" == "true" && -s "$ca" ]]; then
+    stamp=$(date -u +%Y%m%d%H%M%S)
+    mv "$ca" "$ca.old-$stamp"
+    mv "$certs_dir/ca.key" "$certs_dir/ca.key.old-$stamp" 2>/dev/null
+    echo "  ROTATE_CA=true: moved the old CA aside (.old-$stamp). A new CA will be generated."
+    echo "  Every client must trust the new one: /data/ca_download/ca.crt"
+    return 0
+  fi
+  [[ -s "$ca" ]] || return 0
+  left=$(cert_days_left "$ca") || { echo "Error: can't read $ca."; return 1; }
+  if ! openssl x509 -checkend 0 -noout -in "$ca" >/dev/null 2>&1; then
+    echo "Error: the CA in $certs_dir has expired (${left#-} days ago). Nothing has been changed."
+    echo "  ROTATE_CA=true generates a new CA. Every client must then trust it again."
+    return 1
+  fi
+  if (( left < CA_EXPIRY_WARN_DAYS )); then
+    echo "  WARNING: the CA in $certs_dir expires in $left days. ROTATE_CA=true replaces it, and clients must then trust the new one."
   fi
 }
 
@@ -521,8 +664,29 @@ function ca_gen () {
   openssl req -x509 -new -nodes -sha512 -days "$DURATION_DAYS" -subj "/C=$COUNTRY/ST=$STATE/L=$LOCATION/O=$ORGANIZATION/CN=$REGISTRY_COMMON_NAME" -key "$certs_dir/ca.key" -out "$certs_dir/ca.crt" || return 1
 }
 
+# server_cert_reusable: is the existing key and certificate still right for this install?
+function server_cert_reusable () {
+  local crt="$certs_dir/$REGISTRY_COMMON_NAME.crt" key="$certs_dir/$REGISTRY_COMMON_NAME.key" san subject
+  [[ -s "$crt" && -s "$key" && -s "$certs_dir/$REGISTRY_COMMON_NAME-fullchain.crt" && -s "$certs_dir/ca.crt" ]] || return 1
+  openssl verify -CAfile "$certs_dir/ca.crt" "$crt" >/dev/null 2>&1 || return 1
+  openssl x509 -checkend $((CERT_RENEW_BEFORE_DAYS * 86400)) -noout -in "$crt" >/dev/null 2>&1 || return 1
+  san=$(openssl x509 -noout -ext subjectAltName -in "$crt" 2>/dev/null)
+  grep -qF "DNS:$REGISTRY_COMMON_NAME" <<< "$san" || return 1
+  grep -qF "DNS:$current_hostname" <<< "$san" || return 1
+  grep -qF "IP Address:$mgmt_ip" <<< "$san" || return 1
+  subject=$(openssl x509 -noout -subject -nameopt compat -in "$crt" 2>/dev/null)
+  [[ "$subject" == "subject=/C=$COUNTRY/ST=$STATE/L=$LOCATION/O=$ORGANIZATION/CN=$REGISTRY_COMMON_NAME" ]] || return 1
+}
+
 function server_cert_gen () {
-  echo "  Creating server certificate valid for $DURATION_DAYS days (signed by the CA in $certs_dir)..."
+  # A leaf can't usefully outlive its CA, so limit it to what the CA has left
+  local days=$DURATION_DAYS left
+  left=$(cert_days_left "$certs_dir/ca.crt") || return 1
+  if (( days > left )); then
+    (( left + 1 < DURATION_DAYS )) && echo "  WARNING: DURATION_DAYS=$DURATION_DAYS, but the CA only has $left days left. Issuing for $left days."
+    days=$left
+  fi
+  echo "  Creating server certificate valid for $days days (signed by the CA in $certs_dir)..."
   mkdir -p "$certs_dir"
   # Generate server key
   openssl genrsa -out "$certs_dir/$REGISTRY_COMMON_NAME.key" 4096 || return 1
@@ -543,7 +707,7 @@ DNS.2=$current_hostname
 EOF
 
   # Generate signed certificate
-  openssl x509 -req -sha512 -days "$DURATION_DAYS" -extfile "$certs_dir/v3.ext" -CA "$certs_dir/ca.crt" -CAkey "$certs_dir/ca.key" -CAcreateserial -in "$certs_dir/$REGISTRY_COMMON_NAME.csr" -out "$certs_dir/$REGISTRY_COMMON_NAME.crt" || return 1
+  openssl x509 -req -sha512 -days "$days" -extfile "$certs_dir/v3.ext" -CA "$certs_dir/ca.crt" -CAkey "$certs_dir/ca.key" -CAcreateserial -in "$certs_dir/$REGISTRY_COMMON_NAME.csr" -out "$certs_dir/$REGISTRY_COMMON_NAME.crt" || return 1
   # Convert signed certificate from .crt to .cert
   openssl x509 -inform PEM -in "$certs_dir/$REGISTRY_COMMON_NAME.crt" -out "$certs_dir/$REGISTRY_COMMON_NAME.cert" || return 1
   # Create fullchain (server cert + CA cert) so nginx sends the complete chain during TLS handshake
@@ -551,8 +715,13 @@ EOF
   echo "Certificate generation completed..."
 }
 
+# Install path: keep a server certificate that's still good, so a redeploy doesn't change the key
 function cert_gen () {
   ca_gen || return 1
+  if server_cert_reusable; then
+    echo "  Keeping the existing server certificate: still valid, and right for this name and address."
+    return 0
+  fi
   server_cert_gen || return 1
 }
 
@@ -573,24 +742,25 @@ function harbor_cert_install () {
 
   # Record the CA fingerprint so uninstall can identify this install's trust entries
   set_install_env_value CA_FINGERPRINT "$(openssl x509 -noout -fingerprint -sha256 -in "$certs_dir/ca.crt" 2>/dev/null | cut -d= -f2)"
-
-  # Restart docker
-  if ! systemctl restart docker; then
-    echo "Error: Failed to restart docker after installing certificates."
-    return 1
-  fi
 }
 
-function run_harbor_installer() {
+# Have the installer in hand before anything changes
+function prefetch_harbor_installer() {
   local installer_tgz="$base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz"
-  if [ -f "$base_dir/harbor-install-files/VERSION.txt" ]; then
+  mkdir -p "$base_dir/harbor-install-files"
+  if bundle_mode; then
     if [[ ! -s "$installer_tgz" ]]; then
       echo "Error: $installer_tgz is missing or empty in this offline bundle."
+      echo "  If this machine isn't air-gapped and the bundle is left over from offline-prep, set HARBOR_FORCE_ONLINE=true."
       return 1
     fi
   else
     download_harbor_offline_package || return 1
   fi
+}
+
+function run_harbor_installer() {
+  local installer_tgz="$base_dir/harbor-install-files/harbor-offline-installer-v$HARBOR_VERSION.tgz"
   tar xzvf "$installer_tgz" -C /opt/ || return 1
   /opt/harbor/install.sh || return 1
   echo "  creating crumb file..."
@@ -635,16 +805,17 @@ function apt_download_packs () {
   install_packages_check || return 1
   ensure_docker_repo || return 1
   cd "$base_dir/harbor-install-files/apt-packages" || return 1
-  if ! ./install_packages.sh save "${DOCKER_PACKAGES[@]}"; then
+  # curl goes in too: the install needs it for the API check, and minimal images don't have it
+  if ! ./install_packages.sh save "${DOCKER_PACKAGES[@]}" curl; then
     echo "Error: install_packages.sh failed to save the docker packages (${DOCKER_PACKAGES[*]})."
-    cd "$base_dir"
+    cd "$base_dir" || return 1
     return 1
   fi
   # Verify a usable package archive was actually produced - the offline package
   # contract includes offline-packages.tar.gz
   if [[ ! -s offline-packages.tar.gz ]] || ! tar -tzf offline-packages.tar.gz 2>/dev/null | grep -qE '\.(deb|rpm)$'; then
     echo "Error: offline-packages.tar.gz was not produced or contains no .deb/.rpm packages."
-    cd "$base_dir"
+    cd "$base_dir" || return 1
     return 1
   fi
   cd "$base_dir" || return 1
@@ -702,7 +873,7 @@ EOF
 function prepare_offline_package() {
   echo "  Generating offline archive..."
   cd "$base_dir" || return 1
-  echo "Offline package generated on $(date) for $os_release_version and Harbor version $HARBOR_VERSION" | tee "$base_dir/harbor-install-files/VERSION.txt"
+  echo "Offline package generated on $(date) for $os_release_version, Harbor version $HARBOR_VERSION, installer version $SCRIPT_VERSION" | tee "$base_dir/harbor-install-files/VERSION.txt"
   generate_bundle_licenses
   tar czvf harbor-offline-package.tar.gz harbor-install-files/ install_harbor.sh LICENSES || return 1
 }
@@ -712,7 +883,8 @@ function prepare_offline_package() {
 function new_cert_check() {
   if [[ "$NEW_CERT_GEN" -eq 1 ]]; then
     echo "  Generating new self-signed certificate (existing CA is reused when present)..."
-    cert_gen || return 1
+    ca_gen || return 1
+    server_cert_gen || return 1
   elif [[ -n "$USER_CERT_CRT" && -n "$USER_CERT_KEY" && -n "$USER_CA_CRT" ]]; then
     echo "  Using user-supplied certificates..."
     # Validate files exist
@@ -751,19 +923,166 @@ function new_cert_check() {
   fi
 }
 
+# Escape for a double-quoted YAML scalar, a quoted curl config value or a JSON string.
+# All three use these same two escapes, and check_passwords rejects control characters.
+function dq_escape () {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '%s' "$s"
+}
+
+function dq_unescape () {
+  local s=$1
+  s=${s//\\\"/\"}
+  s=${s//\\\\/\\}
+  printf '%s' "$s"
+}
+
+# yml_password <admin|db> [file]: what harbor.yml holds. Handles quoted lines, and the unquoted ones older installs wrote.
+function yml_password () {
+  local which=$1 file=${2:-/opt/harbor/harbor.yml} line
+  if [[ "$which" == admin ]]; then
+    line=$(sed -n 's/^harbor_admin_password: *//p' "$file" | head -n 1)
+  else
+    line=$(sed -n '/^database:/,/^[^ #]/{s/^  password: *//p}' "$file" | head -n 1)
+  fi
+  if [[ "$line" == \"*\" ]]; then
+    line=${line#\"}
+    line=${line%\"}
+    dq_unescape "$line"
+  else
+    printf '%s' "$line"
+  fi
+}
+
 function preserve_existing_yml_passwords () {
-  # update-certificates regenerates harbor.yml - keep the passwords the running
+  # A re-run regenerates harbor.yml - keep the passwords the running
   # install uses unless the caller explicitly re-passed them
   [[ -f /opt/harbor/harbor.yml ]] || return 0
   local current
   if [[ -z "$user_set_harbor_password" ]]; then
-    current=$(sed -n 's/^harbor_admin_password: "\(.*\)"$/\1/p' /opt/harbor/harbor.yml | head -n 1)
+    current=$(yml_password admin)
     [[ -n "$current" ]] && HARBOR_PASSWORD="$current"
   fi
   if [[ -z "$user_set_harbor_db_password" ]]; then
-    current=$(awk '/^database:/{f=1;next} /^[^ #]/{f=0} f && $1=="password:"{print $2; exit}' /opt/harbor/harbor.yml)
+    current=$(yml_password db)
     [[ -n "$current" ]] && HARBOR_DB_PASSWORD="$current"
   fi
+}
+
+# Postgres keeps the password it was created with, so writing a different one to harbor.yml only breaks Harbor
+function check_existing_db_password () {
+  if [[ -f /opt/harbor/harbor.yml ]]; then
+    [[ -n "$user_set_harbor_db_password" ]] || return 0
+    if [[ "$(yml_password db)" != "$HARBOR_DB_PASSWORD" ]]; then
+      echo "Error: HARBOR_DB_PASSWORD differs from the password this install's database was created with."
+      echo "  It only takes effect on a first install, so nothing has been changed."
+      echo "  Run again without it, or change the database password by hand."
+      return 1
+    fi
+  elif [[ -z "$user_set_harbor_db_password" ]]; then
+    echo "Error: $data_dir/database exists, but /opt/harbor/harbor.yml is gone, so the database password is unknown."
+    echo "  Writing the default would break Harbor. Pass the password it was created with as HARBOR_DB_PASSWORD."
+    return 1
+  fi
+}
+
+function check_passwords () {
+  local value
+  for value in "$HARBOR_PASSWORD" "$HARBOR_DB_PASSWORD"; do
+    if [[ "$value" == *[[:cntrl:]]* ]]; then
+      echo "Error: HARBOR_PASSWORD and HARBOR_DB_PASSWORD can't contain control characters."
+      return 1
+    fi
+  done
+}
+
+# Harbor's rule for new users: 8 to 128 characters, with a lowercase letter, an uppercase letter and a number
+function check_harbor_username () {
+  [[ "$HARBOR_USERNAME" == "admin" ]] && return 0
+  if [[ ! "$HARBOR_USERNAME" =~ ^[A-Za-z0-9._-]{1,255}$ ]]; then
+    echo "Error: HARBOR_USERNAME '$HARBOR_USERNAME' can only use letters, numbers, dots, underscores and hyphens."
+    return 1
+  fi
+  if [[ ${#HARBOR_PASSWORD} -lt 8 || ${#HARBOR_PASSWORD} -gt 128 || ! "$HARBOR_PASSWORD" =~ [a-z] || ! "$HARBOR_PASSWORD" =~ [A-Z] || ! "$HARBOR_PASSWORD" =~ [0-9] ]]; then
+    echo "Error: HARBOR_USERNAME=$HARBOR_USERNAME needs a stronger HARBOR_PASSWORD. Harbor requires 8 to 128 characters,"
+    echo "  with a lowercase letter, an uppercase letter and a number, for any user other than admin."
+    return 1
+  fi
+}
+
+# Nothing to do when the running stack is already what was asked for.
+function harbor_unchanged () {
+  [[ "${HARBOR_FORCE_REDEPLOY,,}" == "true" ]] && return 1
+  [[ -f "$install_env_file" && -f /opt/harbor/harbor.yml && -f /opt/harbor/docker-compose.yml ]] || return 1
+  command -v docker >/dev/null 2>&1 || return 1
+  [[ "$(get_install_env_value HARBOR_VERSION)" == "$HARBOR_VERSION" ]] || return 1
+  [[ "$(docker inspect -f '{{.Config.Image}}' harbor-core 2>/dev/null)" == *":v$HARBOR_VERSION" ]] || return 1
+  local total running rendered same=1
+  total=$(docker compose -f /opt/harbor/docker-compose.yml ps -a --format '{{.Name}}' 2>/dev/null | wc -l)
+  running=$(docker compose -f /opt/harbor/docker-compose.yml ps --status running --format '{{.Name}}' 2>/dev/null | wc -l)
+  [[ "$total" -gt 0 && "$total" -eq "$running" ]] || return 1
+  # harbor_admin_password only applies on a first install, so a difference there needs no redeploy
+  rendered=$(mktemp)
+  gen_harbor_yml "$rendered"
+  cmp -s <(grep -v '^harbor_admin_password:' "$rendered") <(grep -v '^harbor_admin_password:' /opt/harbor/harbor.yml) || same=0
+  rm -f "$rendered"
+  [[ $same -eq 1 ]] || return 1
+  server_cert_reusable
+}
+
+# --- Rollback for update-certificates --- #
+
+cert_snapshot=""
+
+function snapshot_for_cert_update () {
+  local certsd="$docker_certs_root/$REGISTRY_COMMON_NAME:$HARBOR_PORT"
+  cert_snapshot=$(mktemp -d /opt/harbor/.cert-update.XXXXXX) || return 1
+  chmod 700 "$cert_snapshot"
+  cp -a /opt/harbor/harbor.yml /opt/harbor/docker-compose.yml "$certs_dir" "$cert_snapshot/" || return 1
+  [[ -d /opt/harbor/common/config ]] && { cp -a /opt/harbor/common/config "$cert_snapshot/common-config" || return 1; }
+  [[ -f "$install_env_file" ]] && cp -a "$install_env_file" "$cert_snapshot/install-env"
+  [[ -f "$certsd/ca.crt" ]] && cp -a "$certsd/ca.crt" "$cert_snapshot/certsd-ca.crt"
+  [[ -f "$data_dir/ca_download/ca.crt" ]] && cp -a "$data_dir/ca_download/ca.crt" "$cert_snapshot/download-ca.crt"
+  trap rollback_cert_update EXIT
+}
+
+function discard_cert_snapshot () {
+  trap - EXIT
+  [[ -n "$cert_snapshot" ]] && rm -rf "$cert_snapshot"
+  cert_snapshot=""
+}
+
+# Any failure during update-certificates: put everything back, bring the stack up, and keep the failure's exit code
+function rollback_cert_update () {
+  local rc=$? certsd="$docker_certs_root/$REGISTRY_COMMON_NAME:$HARBOR_PORT" attempt code=""
+  trap - EXIT
+  [[ -n "$cert_snapshot" && -d "$cert_snapshot" ]] || exit "$rc"
+  echo "ERROR: The certificate update failed. Restoring the previous certificates and restarting Harbor..." >&2
+  rm -rf "$certs_dir"
+  cp -a "$cert_snapshot/$(basename "$certs_dir")" "$certs_dir"
+  cp -a "$cert_snapshot/harbor.yml" "$cert_snapshot/docker-compose.yml" /opt/harbor/
+  if [[ -d "$cert_snapshot/common-config" ]]; then
+    rm -rf /opt/harbor/common/config
+    cp -a "$cert_snapshot/common-config" /opt/harbor/common/config
+  fi
+  [[ -f "$cert_snapshot/install-env" ]] && cp -a "$cert_snapshot/install-env" "$install_env_file"
+  [[ -f "$cert_snapshot/certsd-ca.crt" ]] && cp -a "$cert_snapshot/certsd-ca.crt" "$certsd/ca.crt"
+  [[ -f "$cert_snapshot/download-ca.crt" ]] && cp -a "$cert_snapshot/download-ca.crt" "$data_dir/ca_download/ca.crt"
+  docker compose -f /opt/harbor/docker-compose.yml up -d >&2 || echo "ERROR: Harbor didn't restart. Check 'docker compose -f /opt/harbor/docker-compose.yml ps'." >&2
+  for ((attempt = 1; attempt <= 36; attempt++)); do
+    code=$(curl -sk -m 5 -o /dev/null -w '%{http_code}' "https://$mgmt_ip:$HARBOR_PORT/api/v2.0/ping" || true)
+    [[ "$code" == "200" ]] && break
+    sleep 5
+  done
+  if [[ "$code" == "200" ]]; then
+    echo "  Harbor is back up with its previous certificates." >&2
+    rm -rf "$cert_snapshot"
+  else
+    echo "ERROR: Harbor isn't answering after the rollback (last status: $code). The snapshot is kept in $cert_snapshot." >&2
+  fi
+  exit "$rc"
 }
 
 function run_harbor_prepare () {
@@ -780,6 +1099,11 @@ function verify_served_certificate () {
   expected=$(openssl x509 -noout -fingerprint -sha256 -in "$certs_dir/$REGISTRY_COMMON_NAME.crt" 2>/dev/null | cut -d= -f2)
   if [[ -z "$expected" ]]; then
     echo "Error: Unable to read $certs_dir/$REGISTRY_COMMON_NAME.crt to verify the served certificate."
+    return 1
+  fi
+  # Matching the file proves nginx loaded it, not that any client will accept it
+  if ! openssl verify -CAfile "$certs_dir/ca.crt" "$certs_dir/$REGISTRY_COMMON_NAME.crt" >/dev/null 2>&1; then
+    echo "Error: $certs_dir/$REGISTRY_COMMON_NAME.crt doesn't verify against the CA in $certs_dir."
     return 1
   fi
   echo "  Verifying the registry is serving the new certificate..."
@@ -802,22 +1126,56 @@ function verify_served_certificate () {
 function write_install_env () {
   # FIRST mutating step of install: record the install-time values (never the
   # password) so uninstall and update-certificates operate on what was actually
-  # installed, not on whatever the current environment defaults to
+  # installed, not on whatever the current environment defaults to.
+  # This merges with an earlier record. HARBOR_VERSION stays what's actually running until
+  # commit_install_version, and earlier records of what this installer changed are kept.
   mkdir -p "$(dirname "$install_env_file")"
+  local prior_version prior_users prior_ca
+  prior_version=$(get_install_env_value HARBOR_VERSION)
+  prior_users=$(docker_group_users)
+  prior_ca=$(get_install_env_value CA_FINGERPRINT)
   cat > "$install_env_file" <<EOF
 # Harbor install-time state - written by install_harbor.sh (no secrets stored here)
 # Consumed by uninstall-harbor and update-certificates. Do not edit.
 REGISTRY_COMMON_NAME=$REGISTRY_COMMON_NAME
 HARBOR_PORT=$HARBOR_PORT
-HARBOR_VERSION=$HARBOR_VERSION
+HARBOR_VERSION=$prior_version
+HARBOR_VERSION_REQUESTED=$HARBOR_VERSION
+HARBOR_USERNAME=$HARBOR_USERNAME
+INSTALLER_VERSION=$SCRIPT_VERSION
 INSTALL_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 INSTALL_USER=$user_name
 INSTALL_FILES_DIR=$base_dir/harbor-install-files
-DOCKER_GROUP_ADDED=0
-CA_FINGERPRINT=
+DOCKER_GROUP_USERS=$prior_users
+CA_FINGERPRINT=$prior_ca
 EOF
   chmod 600 "$install_env_file"
   echo "  Recorded install-time state in $install_env_file"
+}
+
+# The last step of a successful install: now the requested version really is what's running
+function commit_install_version () {
+  set_install_env_value HARBOR_VERSION "$HARBOR_VERSION"
+  set_install_env_value HARBOR_VERSION_REQUESTED ""
+}
+
+# Users this installer added to the docker group. Older installs recorded a flag and one user.
+function docker_group_users () {
+  [[ -f "$install_env_file" ]] || return 0
+  if grep -q '^DOCKER_GROUP_USERS=' "$install_env_file"; then
+    get_install_env_value DOCKER_GROUP_USERS
+  elif [[ "$(get_install_env_value DOCKER_GROUP_ADDED)" == "1" ]]; then
+    get_install_env_value INSTALL_USER
+  fi
+}
+
+function record_docker_group_user () {
+  local users
+  users=$(docker_group_users)
+  case " $users " in
+    *" $1 "*) ;;
+    *) set_install_env_value DOCKER_GROUP_USERS "${users:+$users }$1" ;;
+  esac
 }
 
 function get_install_env_value () {
@@ -853,8 +1211,7 @@ function load_install_env () {
     [[ -n "$recorded" ]] && HARBOR_VERSION="$recorded"
   fi
   recorded_install_files_dir=$(get_install_env_value INSTALL_FILES_DIR)
-  recorded_docker_group_added=$(get_install_env_value DOCKER_GROUP_ADDED)
-  recorded_install_user=$(get_install_env_value INSTALL_USER)
+  recorded_docker_users=$(docker_group_users)
   echo "  Using install-time state from $install_env_file (REGISTRY_COMMON_NAME=$REGISTRY_COMMON_NAME, HARBOR_PORT=$HARBOR_PORT)"
 }
 
@@ -883,26 +1240,89 @@ function run_step() {
   fi
 }
 
+# write_api_cfg <file> <user> <password>: credentials for curl -K, so they stay off argv
+function write_api_cfg () {
+  (umask 077; printf 'user = "%s:%s"\n' "$(dq_escape "$2")" "$(dq_escape "$3")" > "$1")
+}
+
+function api_code () { # api_code <cfg> <path>
+  curl -s -o /dev/null -w "%{http_code}" -K "$1" -k "https://$mgmt_ip:$HARBOR_PORT/api/v2.0/$2"
+}
+
+# ensure_harbor_user: make HARBOR_USERNAME a system administrator. Harbor can't rename admin, so this is a second
+# account, and admin stays. It never resets anything: a clash is reported, and left for you to sort out.
+function ensure_harbor_user () {
+  local admin_cfg=$1 named_cfg=$2 code id tmp email
+  tmp=$(mktemp)
+  code=$(curl -s -o "$tmp" -w "%{http_code}" -K "$named_cfg" -k "https://$mgmt_ip:$HARBOR_PORT/api/v2.0/users/current")
+  if [[ "$code" == "200" ]] && grep -q '"sysadmin_flag": *true' "$tmp"; then
+    echo "  Administrator '$HARBOR_USERNAME' already exists."
+    rm -f "$tmp"
+    return 0
+  fi
+  if [[ "$code" == "200" ]]; then
+    id=$(grep -o '"user_id": *[0-9]*' "$tmp" | grep -o '[0-9]*$')
+  else
+    email=${HARBOR_USER_EMAIL:-$HARBOR_USERNAME@$REGISTRY_COMMON_NAME}
+    code=$(curl -s -D "$tmp" -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" -K "$admin_cfg" -k \
+      --data-binary @- "https://$mgmt_ip:$HARBOR_PORT/api/v2.0/users" <<JSON
+{"username": "$HARBOR_USERNAME", "email": "$(dq_escape "$email")", "realname": "$HARBOR_USERNAME", "password": "$(dq_escape "$HARBOR_PASSWORD")"}
+JSON
+)
+    if [[ "$code" == "409" ]]; then
+      echo "  CRITICAL: Harbor user '$HARBOR_USERNAME' already exists with a different password. Nothing was changed."
+      rm -f "$tmp"
+      return 1
+    fi
+    if [[ "$code" != "201" ]]; then
+      echo "  CRITICAL: Harbor refused to create user '$HARBOR_USERNAME' (HTTP $code)."
+      rm -f "$tmp"
+      return 1
+    fi
+    id=$(tr -d '\r' < "$tmp" | sed -n 's|^[Ll]ocation: .*/users/\([0-9]*\)$|\1|p')
+  fi
+  rm -f "$tmp"
+  if [[ -z "$id" ]]; then
+    echo "  CRITICAL: Could not find the ID of Harbor user '$HARBOR_USERNAME'."
+    return 1
+  fi
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT -H "Content-Type: application/json" -K "$admin_cfg" -k \
+    -d '{"sysadmin_flag": true}' "https://$mgmt_ip:$HARBOR_PORT/api/v2.0/users/$id/sysadmin")
+  if [[ "$code" != "200" ]]; then
+    echo "  CRITICAL: Could not make '$HARBOR_USERNAME' a system administrator (HTTP $code)."
+    return 1
+  fi
+  echo "  Created administrator '$HARBOR_USERNAME'."
+}
+
 create_harbor_projects() {
-    local max_attempts=12
     local wait_seconds=5
+    local max_attempts=$((HARBOR_API_WAIT_SEC / wait_seconds))
     local attempt=1
     local connected=false
     local health_status=""
     local rc=0
-    local curl_cfg
+    local curl_cfg admin_cfg named_cfg=""
     read -r -a PROJECTS_ARRAY <<< "$PROJECTS"
     # Keep credentials off argv: pass them to curl via a root-only config file
-    curl_cfg=$(mktemp)
-    chmod 600 "$curl_cfg"
-    printf 'user = "%s:%s"\n' "$HARBOR_USERNAME" "$HARBOR_PASSWORD" > "$curl_cfg"
+    admin_cfg=$(mktemp)
+    write_api_cfg "$admin_cfg" admin "$HARBOR_PASSWORD"
+    curl_cfg=$admin_cfg
+    if [[ "$HARBOR_USERNAME" != "admin" ]]; then
+        named_cfg=$(mktemp)
+        write_api_cfg "$named_cfg" "$HARBOR_USERNAME" "$HARBOR_PASSWORD"
+    fi
     # 1. Connectivity & Auth Pre-Check with Retry Loop
-    echo "  Starting Harbor API health check (Timeout: $((max_attempts * wait_seconds))s)..."
+    echo "  Starting Harbor API health check (Timeout: ${HARBOR_API_WAIT_SEC}s)..."
 
     while [ $attempt -le $max_attempts ]; do
-        health_status=$(curl -s -o /dev/null -w "%{http_code}" \
-            -K "$curl_cfg" -k \
-            "https://$mgmt_ip:$HARBOR_PORT/api/v2.0/projects?page_size=1")
+        # The named account first, because admin's password may have been changed in the UI since
+        if [[ -n "$named_cfg" && "$(api_code "$named_cfg" 'projects?page_size=1')" == "200" ]]; then
+            echo "  Connection successful on attempt $attempt."
+            connected=true
+            break
+        fi
+        health_status=$(api_code "$admin_cfg" 'projects?page_size=1')
 
         if [[ "$health_status" == "200" ]]; then
             echo "  Connection successful on attempt $attempt."
@@ -916,22 +1336,30 @@ create_harbor_projects() {
     done
 
     if [ "$connected" = false ]; then
-        rm -f "$curl_cfg"
+        rm -f "$admin_cfg" "$named_cfg"
         if [[ "$health_status" == "401" ]]; then
             echo "  CRITICAL: Harbor API rejected the credentials (HTTP 401)."
             if [[ $data_preexisting -eq 1 ]]; then
                 echo "  This install reused existing Harbor data in $data_dir - the ORIGINAL admin password is in effect, not the HARBOR_PASSWORD passed to this run."
             fi
         else
-            echo "  CRITICAL: Harbor API remained unreachable after $((max_attempts * wait_seconds)) seconds (last status: $health_status)."
+            echo "  CRITICAL: Harbor API remained unreachable after ${HARBOR_API_WAIT_SEC} seconds (last status: $health_status). HARBOR_API_WAIT_SEC allows longer."
         fi
         return 1
+    fi
+
+    if [[ -n "$named_cfg" ]]; then
+        if ! ensure_harbor_user "$admin_cfg" "$named_cfg"; then
+            rm -f "$admin_cfg" "$named_cfg"
+            return 1
+        fi
+        curl_cfg=$named_cfg
     fi
 
     # 2. Loop through the PROJECTS array
     if [[ -z "${PROJECTS_ARRAY[*]}" ]]; then
         echo "  No projects defined in the list. Skipping project creation..."
-        rm -f "$curl_cfg"
+        rm -f "$admin_cfg" "$named_cfg"
         return 0
     fi
     echo "  Found projects to create"
@@ -967,7 +1395,7 @@ create_harbor_projects() {
             fi
         fi
     done
-    rm -f "$curl_cfg"
+    rm -f "$admin_cfg" "$named_cfg"
     if [[ $rc -ne 0 ]]; then
         echo "  One or more projects could not be created."
         return 1
@@ -984,9 +1412,11 @@ function check_root_privileges() {
 
 # --- File Generation Functions --- #
 
+# gen_harbor_yml [path]: renders harbor.yml, by default to where Harbor reads it
 function gen_harbor_yml () {
-  mkdir -p /opt/harbor
-  cat > /opt/harbor/harbor.yml <<EOF
+  local dest=${1:-/opt/harbor/harbor.yml}
+  mkdir -p "$(dirname "$dest")"
+  cat > "$dest" <<EOF
 # Configuration file of Harbor
 
 # The IP address or hostname to access admin UI and registry service.
@@ -1033,12 +1463,12 @@ https:
 # The initial password of Harbor admin
 # It only works in first time to install harbor
 # Remember Change the admin password from UI after launching Harbor.
-harbor_admin_password: "$HARBOR_PASSWORD"
+harbor_admin_password: "$(dq_escape "$HARBOR_PASSWORD")"
 
 # Harbor DB configuration
 database:
   # The password for the user('postgres' by default) of Harbor DB. Change this before any production use.
-  password: $HARBOR_DB_PASSWORD
+  password: "$(dq_escape "$HARBOR_DB_PASSWORD")"
   # The maximum number of connections in the idle connection pool. If it <=0, no idle connections are retained.
   max_idle_conns: 100
   # The maximum number of open connections to the database. If it <= 0, then there is no limit on the number of open connections.
@@ -1306,7 +1736,7 @@ cache:
 EOF
 
   # harbor.yml carries the admin and database passwords - keep it root-only
-  chmod 600 /opt/harbor/harbor.yml
+  chmod 600 "$dest"
 }
 
 # --- Main Menu function --- #
@@ -1320,6 +1750,7 @@ function help {
   echo "uninstall-harbor        | Uninstalls Harbor registry"
   echo "offline-prep            | Prepares an offline package"
   echo "update-certificates     | Updates Harbor TLS certificates (self-signed or user-supplied)"
+  echo "version                 | Prints this script's version"
 }
 
 # When sourced (e.g. by a test harness), stop here without running the CLI wrapper
@@ -1330,8 +1761,12 @@ fi
 # Start CLI Wrapper
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    help)
+    help|-h|--help)
       help
+      exit 0
+      ;;
+    version|--version)
+      echo "$SCRIPT_VERSION"
       exit 0
       ;;
     install-harbor)

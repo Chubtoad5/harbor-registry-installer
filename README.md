@@ -116,11 +116,17 @@ All variables have defaults and can be overridden by exporting them before runni
 | `DEBUG` | `1` | Enable verbose debug output (`1` = on, `0` = off) |
 | `HARBOR_VERSION` | `2.15.0` | Harbor release version to install |
 | `HARBOR_PORT` | `443` | HTTPS port for the registry |
-| `HARBOR_USERNAME` | `admin` | Admin username |
+| `HARBOR_USERNAME` | `admin` | System administrator account. Harbor can't rename `admin`, so another name creates a second administrator with the same password, and `admin` stays. It needs 8 to 128 characters with a lowercase letter, an uppercase letter and a number. |
+| `HARBOR_USER_EMAIL` | `<HARBOR_USERNAME>@<REGISTRY_COMMON_NAME>` | Email for that account |
 | `HARBOR_PASSWORD` | `Harbor12345` | Admin password (change after first login). **Only applied on the very first install** — see [Changing the Admin Password](#changing-the-admin-password) |
 | `HARBOR_DB_PASSWORD` | `root123` | Harbor's internal PostgreSQL password. Known limitation: the default is the Harbor-upstream `root123`; override it for production use. Written into `harbor.yml` (root-only, mode 600) |
 | `DOCKER_BRIDGE_CIDR` | `172.30.0.1/16` | Docker bridge CIDR (`bip`). Merged into an existing `/etc/docker/daemon.json` (via `jq`/`python3`) — never clobbers other settings; skipped if `bip` is already defined |
 | `PROJECTS` | _(empty)_ | Space-separated list of Harbor projects to create |
+| `HARBOR_API_WAIT_SEC` | `60` | How long to wait for the Harbor API after (re)starting it |
+| `HARBOR_FORCE_REDEPLOY` | `false` | `true` runs the full install even when nothing has changed |
+| `HARBOR_FORCE_ONLINE` | `false` | `true` ignores a `VERSION.txt` left by `offline-prep`, and stays online |
+| `DOCKER_VERSION` | _(empty)_ | Docker version to install when Docker isn't installed yet. The start of a version is enough. |
+| `INSTALL_PACKAGES_REF` | `v1.1.0` | Tag, branch or commit of `install_packages.sh` to fetch. `INSTALL_PACKAGES_URL` wins over it, and `INSTALL_PACKAGES_SHA256` checks it. |
 | `MGMT_IP` | _(first `hostname -I` token)_ | Host IP used in the certificate SAN and printed URLs. Set explicitly on multi-homed hosts |
 | `PURGE_DATA` | `false` | `uninstall-harbor` only: `true` removes `/data` entirely. Default removes only the Harbor-created subpaths — safe on shared `/data` mounts |
 
@@ -234,9 +240,28 @@ the **existing** CA, so every remote client that already trusts the CA keeps wor
 rotate the CA, remove `/opt/harbor/certs/ca.crt` and `ca.key` first (all clients must then re-trust the
 new CA). An incomplete CA (only one of the two files present) is a hard error, not a silent regeneration.
 
-Only `ca.crt` and the `.cert` client certificate are placed in `/etc/docker/certs.d/<FQDN>:<PORT>/` —
-the server private key does not belong there and is no longer copied (keys leaked there by older
-versions are cleaned up on the next `update-certificates` or `uninstall-harbor`).
+Only `ca.crt` is placed in `/etc/docker/certs.d/<FQDN>:<PORT>/`. The server private key doesn't belong
+there, and a `.cert` without its key makes every `docker login` fail with "missing key". Either one left
+by an older version is cleaned up on the next `install-harbor` or `update-certificates`.
+
+An expired CA stops `install-harbor` and `update-certificates` (with `NEW_CERT_GEN=1`) before anything
+changes. `ROTATE_CA=true` replaces it, and every client must then trust the new one. A warning appears
+when the CA has fewer than `CA_EXPIRY_WARN_DAYS` left (default 30). A server certificate is never issued
+for longer than the CA has left.
+
+### Re-running the installer
+
+A re-run with nothing changed does nothing to the running stack: no package changes, no new key, no
+Docker restart and no redeploy. It only checks the API and adds any new projects. A changed version, port,
+name or anything else that lands in `harbor.yml` takes the full path, and so does a stack with a container
+down, so a re-run can still repair a broken install. `HARBOR_FORCE_REDEPLOY=true` forces the full path.
+
+The server key survives a redeploy while it's still good: valid against the CA, more than
+`CERT_RENEW_BEFORE_DAYS` left (default 30), and right for the name, address and subject.
+
+`HARBOR_PASSWORD` and `HARBOR_DB_PASSWORD` apply on a first install only. A re-run keeps the values in
+`harbor.yml`. A different `HARBOR_DB_PASSWORD` is refused, because the database keeps the one it was
+created with.
 
 ### Running Behind a Proxy
 
@@ -337,7 +362,7 @@ After installation, the script creates the following structure:
 /data/                        # Harbor persistent data
   ca_download/ca.crt          # CA cert available for client download
 
-/etc/docker/certs.d/<FQDN>:<PORT>/   # Docker client trust store (<FQDN>.cert + ca.crt only)
+/etc/docker/certs.d/<FQDN>:<PORT>/   # Docker client trust store (ca.crt only)
 /etc/systemd/system/harbor-docker.service
 ```
 
@@ -410,8 +435,6 @@ openssl x509 -req -sha512 -days $DAYS \
   -CA $CERT_DIR/ca.crt -CAkey $CERT_DIR/ca.key -CAcreateserial \
   -in $CERT_DIR/$FQDN.csr -out $CERT_DIR/$FQDN.crt
 
-# Convert to .cert for Docker
-openssl x509 -inform PEM -in $CERT_DIR/$FQDN.crt -out $CERT_DIR/$FQDN.cert
 ```
 
 ### Step 3: Install Certificates for Docker
@@ -422,7 +445,6 @@ PORT=443
 
 # Only client trust material belongs in certs.d - never the private key
 mkdir -p /etc/docker/certs.d/$FQDN:$PORT
-cp $CERT_DIR/$FQDN.cert /etc/docker/certs.d/$FQDN:$PORT/
 cp $CERT_DIR/ca.crt     /etc/docker/certs.d/$FQDN:$PORT/
 
 # Make CA available for client download
