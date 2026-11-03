@@ -20,8 +20,8 @@ stage() { mkdir -p harbor-install-files; [ -s "harbor-install-files/harbor-offli
 inst() { env REGISTRY_COMMON_NAME=$CN "$@" ./install_harbor.sh install-harbor >"$W/o" 2>&1; }
 wipe() { ./install_harbor.sh uninstall-harbor >/dev/null 2>&1; }
 ping_code() { curl -sk -m 5 -o /dev/null -w '%{http_code}' "https://$CN:${1:-443}/api/v2.0/ping"; }
-wait_api() { local i; for i in $(seq 1 60); do [ "$(ping_code "${1:-443}")" = 200 ] && return 0; sleep 5; done; return 1; }
-api() { curl -sk -m 10 -u "${U:-admin}:${PW:-Harbor12345}" "https://$CN:${PORT:-443}/api/v2.0/$1"; }
+wait_api() { for _ in $(seq 1 60); do [ "$(ping_code)" = 200 ] && return 0; sleep 5; done; return 1; }
+api() { curl -sk -m 10 -K <(printf 'user = "%s:%s"\n' "${U:-admin}" "${PW:-Harbor12345}") "https://$CN:${PORT:-443}/api/v2.0/$1"; }
 keyhash() { sha256sum "/opt/harbor/certs/$CN.key" | cut -c1-16; }
 started() { docker inspect -f '{{.State.StartedAt}}' harbor-core nginx | tr '\n' ' '; }
 dockerts() { systemctl show docker -p ActiveEnterTimestamp --value; }
