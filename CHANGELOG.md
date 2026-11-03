@@ -3,9 +3,10 @@
 ## v1.1.0 — 2026-11-03 — Day-2 fixes
 
 ### Added
-- **`HARBOR_USERNAME` now works.** Any name other than `admin` used to fail with a 401 at the end of a full install.
-  Harbor can't rename `admin`, so another name now becomes a second system administrator with the same password, and
-  `admin` stays. It needs a password meeting Harbor's rule for new users. `HARBOR_USER_EMAIL` sets its email.
+- **`HARBOR_USERNAME` now works.** Any name other than `admin` used to do nothing: no such account was created, so a project
+  step failed with a 401, and with no `PROJECTS` the install exited 0 with a name that couldn't log in. Harbor can't rename
+  `admin`, so another name now becomes a second system administrator with the same password, and `admin` stays. It needs a
+  password meeting Harbor's rule for new users. `HARBOR_USER_EMAIL` sets its email.
 - **`ROTATE_CA=true`** replaces the CA. `CA_EXPIRY_WARN_DAYS` sets when a warning appears.
 - **`HARBOR_FORCE_ONLINE=true`** ignores a `VERSION.txt` left behind by `offline-prep`.
 - **`HARBOR_FORCE_REDEPLOY=true`**, `CERT_RENEW_BEFORE_DAYS` and `HARBOR_API_WAIT_SEC`.
