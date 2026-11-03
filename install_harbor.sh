@@ -357,8 +357,14 @@ function select_docker_packages () {
             DOCKER_PACKAGES=(docker docker-compose)
             ;;
     esac
-    # Optional pin, in install_packages.sh's name=version form
+    # Optional pin, in install_packages.sh's name=version form. It's for a new install or a bundle: a Docker that's
+    # already here is never moved, the same rule as image_pull_push.sh.
     local i pkg
+    [[ -n "$DOCKER_VERSION" ]] || return 0
+    if [[ "${1:-}" != "save" ]] && command -v docker >/dev/null 2>&1; then
+      echo "  Note: Docker is already installed, so DOCKER_VERSION=$DOCKER_VERSION is ignored."
+      return 0
+    fi
     if [[ -n "$DOCKER_VERSION" ]]; then
       for i in "${!DOCKER_PACKAGES[@]}"; do
         pkg=${DOCKER_PACKAGES[$i]}
@@ -535,7 +541,10 @@ function install_docker_utility() {
     local flags=() packages=("${DOCKER_PACKAGES[@]}")
     read -r -a flags <<< "$(helper_flags)"
     if bundle_mode && [[ -f "$base_dir/harbor-install-files/apt-packages/offline-packages.tar.gz" ]]; then
-        bundle_has_curl && packages+=(curl)
+        # Only a host without it. RHEL 9's curl-minimal conflicts with curl, and it's all the install needs.
+        if ! command -v curl >/dev/null 2>&1 && bundle_has_curl; then
+          packages+=(curl)
+        fi
         ./install_packages.sh offline "${flags[@]}" "${packages[@]}" || { cd "$base_dir" || true; return 1; }
     else
         ensure_docker_repo || { cd "$base_dir" || true; return 1; }
@@ -626,13 +635,13 @@ function cert_days_left () {
 
 # An expired CA signs certificates no client will accept, so it stops the run, before anything changes.
 # Replacing it breaks every client's trust, so that only ever happens on request.
+ca_rotation_due=0
+
 function check_existing_ca () {
-  local ca="$certs_dir/ca.crt" stamp left
+  local ca="$certs_dir/ca.crt" left
   if [[ "${ROTATE_CA,,}" == "true" && -s "$ca" ]]; then
-    stamp=$(date -u +%Y%m%d%H%M%S)
-    mv "$ca" "$ca.old-$stamp"
-    mv "$certs_dir/ca.key" "$certs_dir/ca.key.old-$stamp" 2>/dev/null
-    echo "  ROTATE_CA=true: moved the old CA aside (.old-$stamp). A new CA will be generated."
+    ca_rotation_due=1
+    echo "  ROTATE_CA=true: the CA will be replaced."
     echo "  Every client must trust the new one: /data/ca_download/ca.crt"
     return 0
   fi
@@ -646,6 +655,18 @@ function check_existing_ca () {
   if (( left < CA_EXPIRY_WARN_DAYS )); then
     echo "  WARNING: the CA in $certs_dir expires in $left days. ROTATE_CA=true replaces it, and clients must then trust the new one."
   fi
+}
+
+# Called once everything that can fail early has passed, and after update-certificates has taken its snapshot.
+# Moving the CA any sooner, a failed run would come back with no CA, and the next one would silently make a new one.
+function rotate_ca_if_due () {
+  [[ "$ca_rotation_due" -eq 1 && -s "$certs_dir/ca.crt" ]] || return 0
+  local stamp
+  stamp=$(date -u +%Y%m%d%H%M%S)
+  mv "$certs_dir/ca.crt" "$certs_dir/ca.crt.old-$stamp" || return 1
+  mv "$certs_dir/ca.key" "$certs_dir/ca.key.old-$stamp" 2>/dev/null
+  ca_rotation_due=0
+  echo "  Moved the old CA aside (.old-$stamp). A new CA will be generated."
 }
 
 function ca_gen () {
@@ -721,6 +742,7 @@ EOF
 
 # Install path: keep a server certificate that's still good, so a redeploy doesn't change the key
 function cert_gen () {
+  rotate_ca_if_due || return 1
   ca_gen || return 1
   if server_cert_reusable; then
     echo "  Keeping the existing server certificate: still valid, and right for this name and address."
@@ -887,6 +909,7 @@ function prepare_offline_package() {
 function new_cert_check() {
   if [[ "$NEW_CERT_GEN" -eq 1 ]]; then
     echo "  Generating new self-signed certificate (existing CA is reused when present)..."
+    rotate_ca_if_due || return 1
     ca_gen || return 1
     server_cert_gen || return 1
   elif [[ -n "$USER_CERT_CRT" && -n "$USER_CERT_KEY" && -n "$USER_CA_CRT" ]]; then
@@ -1012,7 +1035,8 @@ function check_existing_db_password () {
     fi
   elif [[ -z "$user_set_harbor_db_password" ]]; then
     echo "Error: $data_dir/database exists, but /opt/harbor/harbor.yml is gone, so the database password is unknown."
-    echo "  Writing the default would break Harbor. Pass the password it was created with as HARBOR_DB_PASSWORD."
+    echo "  Writing the wrong one would break Harbor. Pass the password it was created with as HARBOR_DB_PASSWORD."
+    echo "  If nobody chose one when it was first installed, that's the default: HARBOR_DB_PASSWORD=root123"
     return 1
   fi
 }
@@ -1044,6 +1068,7 @@ function check_harbor_username () {
 # Nothing to do when the running stack is already what was asked for.
 function harbor_unchanged () {
   [[ "${HARBOR_FORCE_REDEPLOY,,}" == "true" ]] && return 1
+  [[ "$ca_rotation_due" -eq 1 ]] && return 1
   [[ -f "$install_env_file" && -f /opt/harbor/harbor.yml && -f /opt/harbor/docker-compose.yml ]] || return 1
   command -v docker >/dev/null 2>&1 || return 1
   [[ "$(get_install_env_value HARBOR_VERSION)" == "$HARBOR_VERSION" ]] || return 1
@@ -1806,7 +1831,7 @@ function help {
 }
 
 # When sourced (e.g. by a test harness), stop here without running the CLI wrapper
-if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+if [[ "${BASH_SOURCE[0]:-$0}" != "$0" ]]; then
   return 0
 fi
 
@@ -1840,7 +1865,7 @@ while [[ $# -gt 0 ]]; do
     offline-prep)
       check_root_privileges
       os_type
-      select_docker_packages
+      select_docker_packages save
       preflight_checks offline-prep
       echo "###   Harbor Offline Preparation Started - $(date)   ###"
       harbor_offline_prep

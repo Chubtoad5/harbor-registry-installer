@@ -24,16 +24,29 @@ make_ca() { # make_ca <days> [faketime offset]
   [ "$status" -eq 1 ]
   [[ "$output" == *"has expired"* && "$output" == *"ROTATE_CA=true"* ]]
 }
-@test "H3: ROTATE_CA moves an expired CA aside, and ca_gen makes a new one" {
+@test "H3: ROTATE_CA touches nothing until the certificates are being made" {
   make_ca 1 '-3d'
-  old=$(openssl x509 -noout -fingerprint -in "$certs_dir/ca.crt")
   ROTATE_CA=true
   run check_existing_ca
   [ "$status" -eq 0 ]
   [[ "$output" == *"Every client must trust the new one"* ]]
-  [ ! -e "$certs_dir/ca.crt" ]
+  [ -s "$certs_dir/ca.crt" ]
+  ! compgen -G "$certs_dir/ca.crt.old-*" >/dev/null
+}
+@test "H3: without a rotation due, nothing moves" {
+  make_ca 365
+  rotate_ca_if_due
+  [ -s "$certs_dir/ca.crt" ]
+}
+@test "H3: ROTATE_CA moves an expired CA aside, and a new one gets made" {
+  make_ca 1 '-3d'
+  old=$(openssl x509 -noout -fingerprint -in "$certs_dir/ca.crt")
+  ROTATE_CA=true
+  check_existing_ca >/dev/null
+  cert_gen >/dev/null
   compgen -G "$certs_dir/ca.crt.old-*" >/dev/null
-  ca_gen >/dev/null
+  compgen -G "$certs_dir/ca.key.old-*" >/dev/null
+  openssl verify -CAfile "$certs_dir/ca.crt" "$certs_dir/reg.example.crt" >/dev/null
   [ "$(openssl x509 -noout -fingerprint -in "$certs_dir/ca.crt")" != "$old" ]
 }
 @test "H3: a CA close to expiry warns, and doesn't stop" {

@@ -94,11 +94,48 @@ no_curl_path() { # a PATH with what preflight needs, and no curl
 @test "the default helper is a tag, not main" {
   [[ "$INSTALL_PACKAGES_URL" == *"/install-packages/v"* ]]
 }
-@test "select_docker_packages pins only the engine and the client" {
+no_docker_path() { # a PATH with no docker on it
+  local d; d=$(mktemp -d)
+  for c in grep sed awk cut; do ln -s "$(command -v "$c")" "$d/$c"; done
+  echo "$d"
+}
+@test "DOCKER_VERSION pins only the engine and the client, on a host with no Docker" {
   DOCKER_VERSION=28.5
   DOCKER_PACKAGES=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+  old=$PATH; PATH=$(no_docker_path)
   select_docker_packages
+  PATH=$old
   [ "${DOCKER_PACKAGES[*]}" = "docker-ce=28.5 docker-ce-cli=28.5 containerd.io docker-buildx-plugin docker-compose-plugin" ]
+}
+@test "DOCKER_VERSION is ignored when Docker is here, and says so" {
+  stub docker 'exit 0'
+  DOCKER_VERSION=28.5
+  DOCKER_PACKAGES=(docker-ce docker-ce-cli)
+  select_docker_packages > "$STUB_DIR/out"
+  [ "${DOCKER_PACKAGES[*]}" = "docker-ce docker-ce-cli" ]
+  grep -q 'ignored' "$STUB_DIR/out"
+}
+@test "DOCKER_VERSION still pins a bundle when Docker is here" {
+  stub docker 'exit 0'
+  DOCKER_VERSION=28.5
+  DOCKER_PACKAGES=(docker-ce docker-ce-cli)
+  select_docker_packages save
+  [ "${DOCKER_PACKAGES[*]}" = "docker-ce=28.5 docker-ce-cli=28.5" ]
+}
+@test "the host's own curl is left alone, because RHEL 9's curl-minimal conflicts with curl" {
+  touch "$base_dir/harbor-install-files/VERSION.txt"
+  bundle_tar curl_8.5.0-2_amd64.deb docker-ce_1_amd64.deb
+  stub curl 'exit 0'; stub docker 'exit 0'; stub systemctl 'exit 0'
+  cat > "$base_dir/harbor-install-files/apt-packages/install_packages.sh" <<'S'
+#!/bin/bash
+echo "helper $*" >> "$STUB_LOG"
+S
+  chmod +x "$base_dir/harbor-install-files/apt-packages/install_packages.sh"
+  create_bridge_json() { :; }
+  DOCKER_PACKAGES=(docker-ce)
+  install_docker_utility >/dev/null
+  called 'helper offline'
+  ! grep 'helper offline' "$STUB_LOG" | grep -qw curl
 }
 @test "H11: admin needs no checks" {
   HARBOR_USERNAME=admin; HARBOR_PASSWORD=changeme
@@ -190,6 +227,11 @@ unchanged_host() { # a fake install that matches the request
 @test "H10: nothing changed: unchanged" {
   unchanged_host
   harbor_unchanged
+}
+@test "H10: a CA rotation that's due isn't unchanged" {
+  unchanged_host
+  ca_rotation_due=1
+  ! harbor_unchanged
 }
 @test "H10: HARBOR_FORCE_REDEPLOY overrides it" {
   unchanged_host

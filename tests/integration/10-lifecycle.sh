@@ -105,6 +105,13 @@ env NEW_CERT_GEN=1 ./install_harbor.sh update-certificates >"$W/o" 2>&1 && bad "
 grep -q 'has expired' "$W/o" && ok "it says why" || bad "no reason given"
 [ "$K" = "$(keyhash)" ] && [ "$S" = "$(started)" ] && ok "nothing changed" || bad "something changed"
 inst HARBOR_VERSION="$NEW" && bad "install accepted an expired CA" || ok "install refuses an expired CA"
+# A failed rotation mustn't lose the CA, or the next run would silently make a new one
+EXPIRED=$(sha256sum /opt/harbor/certs/ca.key | cut -c1-16)
+cp -a /opt/harbor/prepare /opt/harbor/prepare.real; printf '#!/bin/bash\nexit 1\n' > /opt/harbor/prepare
+env ROTATE_CA=true NEW_CERT_GEN=1 ./install_harbor.sh update-certificates >"$W/o" 2>&1 && bad "a failing rotation exited 0" || ok "a failing rotation fails"
+mv /opt/harbor/prepare.real /opt/harbor/prepare
+[ "$EXPIRED" = "$(sha256sum /opt/harbor/certs/ca.key | cut -c1-16)" ] && ok "the failed rotation put the old CA back" || bad "the failed rotation lost the CA"
+wait_api
 if env ROTATE_CA=true NEW_CERT_GEN=1 ./install_harbor.sh update-certificates >"$W/o" 2>&1; then ok "ROTATE_CA renews"; else bad "ROTATE_CA failed"; tail_o; fi
 openssl verify -CAfile /opt/harbor/certs/ca.crt "/opt/harbor/certs/$CN.crt" >/dev/null 2>&1 && ok "the new chain verifies" || bad "the new chain doesn't verify"
 wait_api; docker login "$CN:443" -u admin -p Harbor12345 >/dev/null 2>&1 && ok "docker login with the new CA" || bad "docker login failed with the new CA"
@@ -159,7 +166,8 @@ mkdir -p "$W/o2"; cd "$W/o2" || exit 1
 cp "$REPO/install_harbor.sh" .; chmod +x install_harbor.sh
 mkdir -p harbor-install-files; cp "$TGZ/$NEW.tgz" "harbor-install-files/harbor-offline-installer-v$NEW.tgz"
 env HARBOR_VERSION="$NEW" ./install_harbor.sh offline-prep >"$W/o" 2>&1 && ok "offline-prep" || { bad "offline-prep failed"; tail_o; }
-tar -tzf harbor-install-files/apt-packages/offline-packages.tar.gz | grep -qE '/curl_' && ok "H8: the bundle holds curl" || bad "H8: no curl in the bundle"
+tar -tzf harbor-install-files/apt-packages/offline-packages.tar.gz > "$W/listing"
+grep -qE '/curl_' "$W/listing" && ok "H8: the bundle holds curl" || bad "H8: no curl in the bundle"
 env REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$OLD" ./install_harbor.sh install-harbor >"$W/o" 2>&1 && bad "H12: a stale bundle accepted another version" || ok "H12: a stale bundle still refuses another version"
 grep -q 'HARBOR_FORCE_ONLINE=true' "$W/o" && ok "H12: the error names the way out" || bad "H12: no hint"
 [ -e /opt/harbor/.install-env ] && bad "H12: the refusal changed something" || ok "H12: the refusal changed nothing"
@@ -169,14 +177,16 @@ if env HARBOR_FORCE_ONLINE=true REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$OLD" .
 cd "$W" || exit 1
 echo "=== air-gapped: the bundle on a host with no curl and no route out"
 mkdir -p "$W/o3"; tar -xzf "$W/o2/harbor-offline-package.tar.gz" -C "$W/o3" 2>/dev/null; cd "$W/o3" || exit 1
-mv /usr/bin/curl /usr/bin/curl.off
+# Really removed: with the binary only moved aside, the package manager thinks there's nothing to install
+dpkg -r --force-depends curl >/dev/null 2>&1; hash -r
+command -v curl >/dev/null && bad "the test couldn't remove curl"
 GW=$(ip route | awk '/default/ {print $3; exit}'); DEV=$(ip route | awk '/default/ {print $5; exit}')
 # The clone is reached over the LAN, so only the default route goes
 ip route del default
 if env REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$NEW" PROJECTS=airgap ./install_harbor.sh install-harbor >"$W/o" 2>&1; then ok "H8: an air-gapped install, with the bundle's curl"; else bad "H8: air-gapped install failed"; tail_o; fi
 ip route add default via "$GW" dev "$DEV"
-command -v curl >/dev/null && ok "H8: curl was installed from the bundle" || bad "H8: no curl after the install"
-[ -e /usr/bin/curl.off ] && { [ -e /usr/bin/curl ] || mv /usr/bin/curl.off /usr/bin/curl; rm -f /usr/bin/curl.off; }
+hash -r
+command -v curl >/dev/null && ok "H8: curl was installed from the bundle" || { bad "H8: no curl after the install"; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl >/dev/null 2>&1; hash -r; }
 wait_api; api projects | jq -r '.[].name' | grep -qx airgap && ok "the project exists" || bad "the project is missing"
 ./install_harbor.sh uninstall-harbor >/dev/null 2>&1
 
