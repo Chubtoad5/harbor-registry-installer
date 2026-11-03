@@ -191,7 +191,10 @@ wait_api; api projects | jq -r '.[].name' | grep -qx airgap && ok "the project e
 ./install_harbor.sh uninstall-harbor >/dev/null 2>&1
 
 echo "=== H0, air-gapped: a new bundle over an older install"
+# uninstall-harbor removes harbor-install-files, so both directories need their files back
 cd "$W/o2" || exit 1
+mkdir -p harbor-install-files; cp "$TGZ/$OLD.tgz" "harbor-install-files/harbor-offline-installer-v$OLD.tgz"
+rm -rf "$W/o3"; mkdir -p "$W/o3"; tar -xzf "$W/o2/harbor-offline-package.tar.gz" -C "$W/o3" 2>/dev/null
 env HARBOR_FORCE_ONLINE=true REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$OLD" PROJECTS=demo ./install_harbor.sh install-harbor >"$W/o" 2>&1 && ok "install $OLD" || { bad "install $OLD"; tail_o; }
 wait_api
 docker login "$CN:443" -u admin -p Harbor12345 >/dev/null 2>&1
