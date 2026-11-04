@@ -25,3 +25,9 @@ contains multiple upstream container images, each under its own license, e.g.:
 
 When redistributing the Harbor offline bundle, retain each image's copyright/
 license notices and any bundled NOTICE files.
+
+The air-gap bundle that `offline-prep` builds also holds OS packages: Docker CE, containerd,
+curl and what they depend on, each under its own license. Some are copyleft, including
+iptables (GPL-2.0-or-later), and GnuTLS, librtmp and libidn2 (LGPL). The bundle's LICENSES/
+folder lists them and carries a written offer for their source. LICENSE_OFFER_CONTACT sets who
+it names. When you redistribute a bundle, that offer is yours to honor.

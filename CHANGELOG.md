@@ -12,6 +12,9 @@
 - **`ROTATE_CA=true`** replaces the CA, as `ca.crt.old-<stamp>`. A failed rotation puts the old one back. `CA_EXPIRY_WARN_DAYS` sets when a warning appears.
 - **`HARBOR_FORCE_ONLINE=true`** ignores a `VERSION.txt` left behind by `offline-prep`.
 - **`HARBOR_FORCE_REDEPLOY=true`**, `CERT_RENEW_BEFORE_DAYS` and `HARBOR_API_WAIT_SEC`.
+- **The air-gap bundle's `LICENSES/` folder is now accurate.** It used to say no GPL was bundled, but the OS packages include some: Docker
+  needs iptables, and curl needs GnuTLS, librtmp and libidn2. It now lists every package and carries a written offer for their
+  source. `LICENSE_OFFER_CONTACT` sets who the offer names.
 - **`DOCKER_VERSION`, `INSTALL_PACKAGES_REF`, `INSTALL_PACKAGES_URL` and `INSTALL_PACKAGES_SHA256`.**
 - **`version`, and `SCRIPT_VERSION`.** `.install-env` records `INSTALLER_VERSION`.
 - **Tests:** `tests/unit`, `tests/contract` and `tests/integration`.

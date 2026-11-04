@@ -123,6 +123,7 @@ All variables have defaults and can be overridden by exporting them before runni
 | `DOCKER_BRIDGE_CIDR` | `172.30.0.1/16` | Docker bridge CIDR (`bip`). Merged into an existing `/etc/docker/daemon.json` (via `jq`/`python3`) — never clobbers other settings; skipped if `bip` is already defined |
 | `PROJECTS` | _(empty)_ | Space-separated list of Harbor projects to create |
 | `HARBOR_API_WAIT_SEC` | `60` | How long to wait for the Harbor API after (re)starting it |
+| `LICENSE_OFFER_CONTACT` | the Chubtoad5 project | Who the air-gap bundle's written offer tells people to ask for source code |
 | `HARBOR_FORCE_REDEPLOY` | `false` | `true` runs the full install even when nothing has changed |
 | `HARBOR_FORCE_ONLINE` | `false` | `true` ignores a `VERSION.txt` left by `offline-prep`, and stays online |
 | `HARBOR_ALLOW_DOWNGRADE` | `false` | `true` skips the check that refuses an older `HARBOR_VERSION` than the one installed. An older Harbor can't start on a newer database, so this is rarely what you want. |
@@ -585,6 +586,7 @@ the full third-party list + licenses.
 
 - Harbor (Apache-2.0), Docker (Apache-2.0)
 - The Harbor offline bundle ships several images: registry / Trivy / Notary (Apache-2.0), nginx (BSD-2-Clause), PostgreSQL (PostgreSQL License), and **Redis (license is version-dependent — verify; newer Redis may be RSALv2/SSPL, not OSI-open)**
+- The air-gap bundle from `offline-prep` also holds OS packages: Docker CE, containerd, curl and what they depend on. Some are GPL or LGPL, such as iptables and GnuTLS, so its `LICENSES/` folder lists them and carries a written offer for their source
 
 ## License
 

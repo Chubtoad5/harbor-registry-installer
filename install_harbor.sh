@@ -54,6 +54,8 @@ DURATION_DAYS=${DURATION_DAYS:-"3650"}
 # Replace the CA. Every client must then trust the new one, so this never happens by itself.
 ROTATE_CA=${ROTATE_CA:-false}
 CA_EXPIRY_WARN_DAYS=${CA_EXPIRY_WARN_DAYS:-30}
+# Who a recipient of an air-gap bundle asks for source code, in LICENSES/WRITTEN_OFFER.txt.
+LICENSE_OFFER_CONTACT=${LICENSE_OFFER_CONTACT:-"the Chubtoad5 project via https://github.com/Chubtoad5"}
 # On a re-run, keep a server certificate with more than this many days left
 CERT_RENEW_BEFORE_DAYS=${CERT_RENEW_BEFORE_DAYS:-30}
 
@@ -866,10 +868,10 @@ function download_harbor_offline_package() {
 }
 
 function generate_bundle_licenses() {
-  # Write a LICENSES/ third-party manifest into the offline archive. Harbor and its
-  # components are Apache-2.0; the offline tgz ships several images under their own
-  # licenses (notably Redis, whose license is version-dependent). No GPL/AGPL is
-  # bundled, so no written source offer is required.
+  # Write a LICENSES/ third-party manifest and a written offer into the offline archive. Harbor and
+  # its components are Apache-2.0, and the offline tgz ships several images under their own licenses
+  # (notably Redis, whose license is version-dependent). The OS packages include GPL and LGPL ones:
+  # Docker needs iptables, and curl needs GnuTLS, librtmp and libidn2. So they get a written offer.
   local dir="$base_dir/LICENSES"
   rm -rf "$dir"; mkdir -p "$dir"
   cat > "$dir/THIRD_PARTY_NOTICES.txt" <<EOF
@@ -892,11 +894,43 @@ container images, each carrying its own license inside the image, e.g.:
                             re-verify if you bump HARBOR_VERSION to a release whose
                             redis-photon ships Redis 7.4 or newer.
 
-Docker CE packages installed on the host are Apache-2.0. The installer script is
-Apache-2.0 (Chubtoad5). No GPL/AGPL components are bundled, so no written source offer
-is required; each image's own license/notice ships inside the image.
+Each image's own license/notice ships inside the image. The installer scripts are
+Apache-2.0 (Chubtoad5).
+
+OS packages in harbor-install-files/apt-packages/offline-packages.tar.gz: Docker CE
+and containerd (Apache-2.0), curl, and whatever they depend on for this OS. Each package
+carries its own license (on Debian and Ubuntu, /usr/share/doc/<package>/copyright once
+installed; on RHEL and SLES, rpm -q --licensefiles <package>).
+
+Some of them are copyleft, including iptables (GPL-2.0-or-later), and GnuTLS, librtmp
+and libidn2 (LGPL). They are covered by WRITTEN_OFFER.txt.
+
+The packages in this bundle:
+$(tar -tzf "$base_dir/harbor-install-files/apt-packages/offline-packages.tar.gz" 2>/dev/null | grep -E '\.(deb|rpm)$' | sed 's|.*/||' | sort)
 EOF
-  echo "  Wrote LICENSES/ (third-party manifest)."
+  cat > "$dir/WRITTEN_OFFER.txt" <<EOF
+WRITTEN OFFER FOR CORRESPONDING SOURCE CODE (GPL, LGPL)
+
+This air-gap bundle redistributes operating system packages in binary form, in
+harbor-install-files/apt-packages/offline-packages.tar.gz. THIRD_PARTY_NOTICES.txt lists
+them. Some are licensed under the GNU General Public License or the GNU Lesser General
+Public License.
+
+The distributor of this bundle hereby makes a written offer, valid for three (3) years
+from the date this bundle was created ($(date +%Y-%m-%d)), to give any third party who
+possesses this bundle a complete machine-readable copy of the corresponding source code
+for those packages, for a charge no more than the cost of physically performing the
+source distribution.
+
+The source is also publicly available from the operating system distribution that each
+package came from (for example, apt-get source <package> on Debian and Ubuntu).
+
+To request the source on a physical medium, contact: ${LICENSE_OFFER_CONTACT}
+
+This offer is extended by whoever distributes this bundle, and is independent of the
+Apache-2.0 license that covers the installer scripts themselves.
+EOF
+  echo "  Wrote LICENSES/ (third-party manifest + written offer for the OS packages)."
 }
 
 function prepare_offline_package() {

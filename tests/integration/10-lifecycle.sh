@@ -169,6 +169,11 @@ mkdir -p harbor-install-files; cp "$TGZ/$NEW.tgz" "harbor-install-files/harbor-o
 env HARBOR_VERSION="$NEW" ./install_harbor.sh offline-prep >"$W/o" 2>&1 && ok "offline-prep" || { bad "offline-prep failed"; tail_o; }
 tar -tzf harbor-install-files/apt-packages/offline-packages.tar.gz > "$W/listing"
 grep -qE '/curl_' "$W/listing" && ok "H8: the bundle holds curl" || bad "H8: no curl in the bundle"
+tar -xzf harbor-offline-package.tar.gz -O LICENSES/THIRD_PARTY_NOTICES.txt > "$W/notices" 2>/dev/null
+grep -qE '^curl_' "$W/notices" && ok "the licence notice lists the bundle's packages" || bad "the licence notice doesn't list curl"
+grep -qE '/iptables_' "$W/listing" && ok "the bundle holds iptables, which the notice names as GPL" || bad "no iptables in the bundle, though the notice names it"
+grep -qi 'no GPL' "$W/notices" && bad "the licence notice still says there's no GPL" || ok "the licence notice doesn't claim there's no GPL"
+tar -tzf harbor-offline-package.tar.gz | grep -q '^LICENSES/WRITTEN_OFFER.txt$' && ok "the bundle has a written offer" || bad "no written offer in the bundle"
 env REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$OLD" ./install_harbor.sh install-harbor >"$W/o" 2>&1 && bad "H12: a stale bundle accepted another version" || ok "H12: a stale bundle still refuses another version"
 grep -q 'HARBOR_FORCE_ONLINE=true' "$W/o" && ok "H12: the error names the way out" || bad "H12: no hint"
 [ -e /opt/harbor/.install-env ] && bad "H12: the refusal changed something" || ok "H12: the refusal changed nothing"
