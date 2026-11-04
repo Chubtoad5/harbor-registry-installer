@@ -32,11 +32,11 @@ S
   rm -f /opt/harbor/harbor.v*.tar.gz /opt/harbor/install.sh
 }
 @test "H12: VERSION.txt selects bundle mode, and HARBOR_FORCE_ONLINE overrides it" {
-  ! bundle_mode
+  ! bundle_mode || false
   touch "$base_dir/harbor-install-files/VERSION.txt"
   bundle_mode
   HARBOR_FORCE_ONLINE=true
-  ! bundle_mode
+  ! bundle_mode || false
 }
 @test "H12: a missing installer in bundle mode names the way out" {
   touch "$base_dir/harbor-install-files/VERSION.txt"
@@ -142,7 +142,7 @@ no_docker_path() { # a PATH with no docker on it
 @test "the host's own curl is left alone, because RHEL 9's curl-minimal conflicts with curl" {
   touch "$base_dir/harbor-install-files/VERSION.txt"
   bundle_tar curl_8.5.0-2_amd64.deb docker-ce_1_amd64.deb
-  stub curl 'exit 0'; stub docker 'exit 0'; stub systemctl 'exit 0'
+  stub curl 'exit 0'; stub docker 'exit 0'; stub systemctl 'exit 0'; stub usermod 'exit 0'
   cat > "$base_dir/harbor-install-files/apt-packages/install_packages.sh" <<'S'
 #!/bin/bash
 echo "helper $*" >> "$STUB_LOG"
@@ -248,35 +248,35 @@ unchanged_host() { # a fake install that matches the request
 @test "H10: a CA rotation that's due isn't unchanged" {
   unchanged_host
   ca_rotation_due=1
-  ! harbor_unchanged
+  ! harbor_unchanged || false
 }
 @test "H10: HARBOR_FORCE_REDEPLOY overrides it" {
   unchanged_host
   HARBOR_FORCE_REDEPLOY=true
-  ! harbor_unchanged
+  ! harbor_unchanged || false
 }
 @test "H10: a requested version that isn't recorded or running isn't unchanged" {
   unchanged_host
   HARBOR_VERSION=2.16.0
-  ! harbor_unchanged
+  ! harbor_unchanged || false
   HARBOR_VERSION=2.15.0
   export IMAGE=goharbor/harbor-core:v2.14.1
-  ! harbor_unchanged
+  ! harbor_unchanged || false
 }
 @test "H10: a stopped container isn't unchanged, so a re-run repairs it" {
   unchanged_host
   export RUNNING=2
-  ! harbor_unchanged
+  ! harbor_unchanged || false
 }
 @test "H10: a changed setting that lands in harbor.yml isn't unchanged" {
   unchanged_host
   HARBOR_PORT=8443
-  ! harbor_unchanged
+  ! harbor_unchanged || false
 }
 @test "H10: a manual edit to harbor.yml isn't unchanged" {
   unchanged_host
   echo "# edited" >> /opt/harbor/harbor.yml
-  ! harbor_unchanged
+  ! harbor_unchanged || false
 }
 @test "H10: a different admin password alone needs no redeploy" {
   unchanged_host
@@ -286,13 +286,13 @@ unchanged_host() { # a fake install that matches the request
 @test "H10: a different database password does" {
   unchanged_host
   HARBOR_DB_PASSWORD=Different1
-  ! harbor_unchanged
+  ! harbor_unchanged || false
 }
 @test "H10: a certificate that needs replacing isn't unchanged" {
   unchanged_host
   mgmt_ip=10.0.0.6
   gen_harbor_yml
-  ! harbor_unchanged
+  ! harbor_unchanged || false
 }
 proxy() { # proxy <what core says directly> <what comes back through nginx>
   export CORE_BODY=$1 NGINX_BODY=$2

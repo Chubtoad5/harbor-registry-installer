@@ -69,7 +69,8 @@ make_ca() { # make_ca <days> [faketime offset]
   [[ "$output" == *"WARNING"* ]]
   ca_end=$(date -d "$(openssl x509 -noout -enddate -in "$certs_dir/ca.crt" | cut -d= -f2)" +%s)
   leaf_end=$(date -d "$(openssl x509 -noout -enddate -in "$certs_dir/reg.example.crt" | cut -d= -f2)" +%s)
-  [ "$leaf_end" -le "$ca_end" ]
+  # Days are whole, and the leaf starts just after the CA does, so it can end a moment later. It mustn't end days later.
+  [ "$leaf_end" -le "$((ca_end + 60))" ]
 }
 @test "H3: a first install doesn't warn about its own new CA" {
   ca_gen >/dev/null
