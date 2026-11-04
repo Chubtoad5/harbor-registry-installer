@@ -898,12 +898,14 @@ Each image's own license/notice ships inside the image. The installer scripts ar
 Apache-2.0 (Chubtoad5).
 
 OS packages in harbor-install-files/apt-packages/offline-packages.tar.gz: Docker CE
-and containerd (Apache-2.0), curl, and whatever they depend on for this OS. Each package
-carries its own license (on Debian and Ubuntu, /usr/share/doc/<package>/copyright once
-installed; on RHEL and SLES, rpm -q --licensefiles <package>).
+and containerd (Apache-2.0), curl, and whatever they depend on for this OS. Most packages
+carry their own license (on Debian and Ubuntu, /usr/share/doc/<package>/copyright once
+installed; on RHEL and SLES, rpm -q --licensefiles <package>). Docker's own packages may
+not: its source and license are at https://github.com/moby/moby.
 
-Some of them are copyleft, including iptables (GPL-2.0-or-later), and GnuTLS, librtmp
-and libidn2 (LGPL). They are covered by WRITTEN_OFFER.txt.
+Some of them are copyleft. On Ubuntu, that includes iptables (GPL-2.0-or-later), GnuTLS
+and librtmp (LGPL), and libidn2 (LGPL or GPL). Other systems differ. They are covered by
+WRITTEN_OFFER.txt.
 
 The packages in this bundle:
 $(tar -tzf "$base_dir/harbor-install-files/apt-packages/offline-packages.tar.gz" 2>/dev/null | grep -E '\.(deb|rpm)$' | sed 's|.*/||' | sort)
