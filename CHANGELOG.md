@@ -2,6 +2,8 @@
 
 ## v1.1.0 — 2026-11-03 — Day-2 fixes
 
+**Tested on Ubuntu 24.04 only.** This release ships ahead of the lab's distro runs, so its RHEL and SLES paths, including the `curl-minimal` fix, have only been checked by reading.
+
 ### Added
 - **`HARBOR_USERNAME` now works.** Any name other than `admin` used to do nothing: no such account was created, so a project
   step failed with a 401, and with no `PROJECTS` the install exited 0 with a name that couldn't log in. Harbor can't rename
