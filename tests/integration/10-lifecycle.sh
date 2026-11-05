@@ -196,7 +196,10 @@ tar -tzf harbor-install-files/apt-packages/offline-packages.tar.gz > "$W/listing
 grep -qE '/curl(-minimal)?[_-][0-9]' "$W/listing" && ok "H8: the bundle holds curl" || bad "H8: no curl in the bundle"
 tar -xzf harbor-offline-package.tar.gz -O LICENSES/THIRD_PARTY_NOTICES.txt > "$W/notices" 2>/dev/null
 grep -qE '^curl(-minimal)?[_-][0-9]' "$W/notices" && ok "the licence notice lists the bundle's packages" || bad "the licence notice doesn't list curl"
-grep -qE '/iptables[_-]' "$W/listing" && ok "the bundle holds iptables, which the notice names as GPL" || bad "no iptables in the bundle, though the notice names it"
+# The notice names iptables for Ubuntu only: Docker on another distro may not pull it in, as on Leap 16.
+if [[ "$(. /etc/os-release; echo "$ID")" == ubuntu ]]; then
+  grep -qE '/iptables[_-]' "$W/listing" && ok "the bundle holds iptables, which the notice names as GPL" || bad "no iptables in the bundle, though the notice names it"
+fi
 grep -qi 'no GPL' "$W/notices" && bad "the licence notice still says there's no GPL" || ok "the licence notice doesn't claim there's no GPL"
 tar -tzf harbor-offline-package.tar.gz | grep -q '^LICENSES/WRITTEN_OFFER.txt$' && ok "the bundle has a written offer" || bad "no written offer in the bundle"
 env REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$OLD" ./install_harbor.sh install-harbor >"$W/o" 2>&1 && bad "H12: a stale bundle accepted another version" || ok "H12: a stale bundle still refuses another version"
