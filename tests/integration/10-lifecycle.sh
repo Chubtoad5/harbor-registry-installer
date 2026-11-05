@@ -9,7 +9,32 @@ NEW=2.15.0
 fail=0
 ok()  { echo "PASS  $1"; }
 bad() { echo "FAIL  $1"; fail=1; }
-apt-get update -qq >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq faketime jq >/dev/null 2>&1
+# Test tools, on whichever package manager this host has. iproute2 is only for this test's air-gap steps.
+pkg_install() {
+  if command -v apt-get >/dev/null; then
+    apt-get update -qq >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >/dev/null 2>&1
+  elif command -v dnf >/dev/null; then
+    dnf install -y -q "${@/#iproute2/iproute}" >/dev/null 2>&1
+  else
+    zypper -n -q install "$@" >/dev/null 2>&1
+  fi
+}
+pkg_install jq iproute2 openssl
+# Really removed: with the binary only moved aside, the package manager thinks there's nothing to install.
+remove_curl() {
+  if command -v dpkg >/dev/null; then dpkg -r --force-depends curl >/dev/null 2>&1; return; fi
+  local p
+  for p in curl curl-minimal; do if rpm -q "$p" >/dev/null 2>&1; then echo "This host's curl package: $(rpm -q "$p")"; rpm -e --nodeps "$p" >/dev/null 2>&1; fi; done
+}
+# A certificate that ended two days ago. openssl req can't backdate, and faketime isn't on every distro.
+expired_cert() {
+  local d=$W/expca
+  mkdir -p "$d/new"; : > "$d/index.txt"; echo 01 > "$d/serial"
+  printf '[ca]\ndefault_ca=c\n[c]\ndatabase=%s/index.txt\nnew_certs_dir=%s/new\nserial=%s/serial\ndefault_md=sha256\npolicy=p\n[p]\ncommonName=supplied\n' "$d" "$d" "$d" > "$d/ca.cnf"
+  openssl req -new -subj "/CN=$CN" -key "$W/exp.key" -out "$d/exp.csr" 2>/dev/null
+  openssl ca -batch -notext -config "$d/ca.cnf" -selfsign -keyfile "$W/exp.key" -in "$d/exp.csr" -out "$W/exp.crt" \
+    -startdate "$(date -u -d '3 days ago' +%y%m%d%H%M%SZ)" -enddate "$(date -u -d '2 days ago' +%y%m%d%H%M%SZ)" >/dev/null 2>&1
+}
 IP=$(hostname -I | awk '{print $1}')
 echo "$IP $CN" >> /etc/hosts
 W=$(mktemp -d); cd "$W" || exit 1
@@ -98,7 +123,7 @@ grep -q "^hostname: $CN" /opt/harbor/harbor.yml && ok "kept the recorded name" |
 wait_api
 
 echo "=== H3: an expired CA"
-openssl genrsa -out "$W/exp.key" 2048 2>/dev/null; faketime -f '-3d' openssl req -x509 -new -nodes -days 1 -subj "/CN=$CN" -key "$W/exp.key" -out "$W/exp.crt"
+openssl genrsa -out "$W/exp.key" 2048 2>/dev/null; expired_cert
 cp /opt/harbor/certs/ca.crt "$W/good.crt"; cp /opt/harbor/certs/ca.key "$W/good.key"
 cp "$W/exp.crt" /opt/harbor/certs/ca.crt; cp "$W/exp.key" /opt/harbor/certs/ca.key
 K=$(keyhash); S=$(started)
@@ -168,10 +193,10 @@ cp "$REPO/install_harbor.sh" .; chmod +x install_harbor.sh
 mkdir -p harbor-install-files; cp "$TGZ/$NEW.tgz" "harbor-install-files/harbor-offline-installer-v$NEW.tgz"
 env HARBOR_VERSION="$NEW" ./install_harbor.sh offline-prep >"$W/o" 2>&1 && ok "offline-prep" || { bad "offline-prep failed"; tail_o; }
 tar -tzf harbor-install-files/apt-packages/offline-packages.tar.gz > "$W/listing"
-grep -qE '/curl_' "$W/listing" && ok "H8: the bundle holds curl" || bad "H8: no curl in the bundle"
+grep -qE '/curl(-minimal)?[_-][0-9]' "$W/listing" && ok "H8: the bundle holds curl" || bad "H8: no curl in the bundle"
 tar -xzf harbor-offline-package.tar.gz -O LICENSES/THIRD_PARTY_NOTICES.txt > "$W/notices" 2>/dev/null
-grep -qE '^curl_' "$W/notices" && ok "the licence notice lists the bundle's packages" || bad "the licence notice doesn't list curl"
-grep -qE '/iptables_' "$W/listing" && ok "the bundle holds iptables, which the notice names as GPL" || bad "no iptables in the bundle, though the notice names it"
+grep -qE '^curl(-minimal)?[_-][0-9]' "$W/notices" && ok "the licence notice lists the bundle's packages" || bad "the licence notice doesn't list curl"
+grep -qE '/iptables[_-]' "$W/listing" && ok "the bundle holds iptables, which the notice names as GPL" || bad "no iptables in the bundle, though the notice names it"
 grep -qi 'no GPL' "$W/notices" && bad "the licence notice still says there's no GPL" || ok "the licence notice doesn't claim there's no GPL"
 tar -tzf harbor-offline-package.tar.gz | grep -q '^LICENSES/WRITTEN_OFFER.txt$' && ok "the bundle has a written offer" || bad "no written offer in the bundle"
 env REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$OLD" ./install_harbor.sh install-harbor >"$W/o" 2>&1 && bad "H12: a stale bundle accepted another version" || ok "H12: a stale bundle still refuses another version"
@@ -183,8 +208,7 @@ if env HARBOR_FORCE_ONLINE=true REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$OLD" .
 cd "$W" || exit 1
 echo "=== air-gapped: the bundle on a host with no curl and no route out"
 mkdir -p "$W/o3"; tar -xzf "$W/o2/harbor-offline-package.tar.gz" -C "$W/o3" 2>/dev/null; cd "$W/o3" || exit 1
-# Really removed: with the binary only moved aside, the package manager thinks there's nothing to install
-dpkg -r --force-depends curl >/dev/null 2>&1; hash -r
+remove_curl; hash -r
 command -v curl >/dev/null && bad "the test couldn't remove curl"
 GW=$(ip route | awk '/default/ {print $3; exit}'); DEV=$(ip route | awk '/default/ {print $5; exit}')
 # The clone is reached over the LAN, so only the default route goes
@@ -192,7 +216,7 @@ ip route del default
 if env REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$NEW" PROJECTS=airgap ./install_harbor.sh install-harbor >"$W/o" 2>&1; then ok "H8: an air-gapped install, with the bundle's curl"; else bad "H8: air-gapped install failed"; tail_o; fi
 ip route add default via "$GW" dev "$DEV"
 hash -r
-command -v curl >/dev/null && ok "H8: curl was installed from the bundle" || { bad "H8: no curl after the install"; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl >/dev/null 2>&1; hash -r; }
+command -v curl >/dev/null && ok "H8: curl was installed from the bundle" || { bad "H8: no curl after the install"; pkg_install curl; hash -r; }
 wait_api; api projects | jq -r '.[].name' | grep -qx airgap && ok "the project exists" || bad "the project is missing"
 ./install_harbor.sh uninstall-harbor >/dev/null 2>&1
 
