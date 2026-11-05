@@ -1,5 +1,59 @@
 # Changelog — harbor-registry-installer
 
+## v1.1.0 — 2026-11-03 — Day-2 fixes
+
+**Tested on Ubuntu 24.04 only.** This release ships ahead of the lab's distro runs, so its RHEL and SLES paths, including the `curl-minimal` fix, have only been checked by reading.
+
+### Added
+- **`HARBOR_USERNAME` now works.** Any name other than `admin` used to do nothing: no such account was created, so a project
+  step failed with a 401, and with no `PROJECTS` the install exited 0 with a name that couldn't log in. Harbor can't rename
+  `admin`, so another name now becomes a second system administrator with the same password, and `admin` stays. It needs a
+  password meeting Harbor's rule for new users. `HARBOR_USER_EMAIL` sets its email.
+- **`ROTATE_CA=true`** replaces the CA, as `ca.crt.old-<stamp>`. A failed rotation puts the old one back. `CA_EXPIRY_WARN_DAYS` sets when a warning appears.
+- **`HARBOR_FORCE_ONLINE=true`** ignores a `VERSION.txt` left behind by `offline-prep`.
+- **`HARBOR_FORCE_REDEPLOY=true`**, `CERT_RENEW_BEFORE_DAYS` and `HARBOR_API_WAIT_SEC`.
+- **The air-gap bundle's `LICENSES/` folder is now accurate.** It used to say no GPL was bundled, but the OS packages include some: Docker
+  needs iptables, and curl needs GnuTLS, librtmp and libidn2. It now lists every package and carries a written offer for their
+  source. `LICENSE_OFFER_CONTACT` sets who the offer names.
+- **`DOCKER_VERSION`, `INSTALL_PACKAGES_REF`, `INSTALL_PACKAGES_URL` and `INSTALL_PACKAGES_SHA256`.**
+- **`version`, and `SCRIPT_VERSION`.** `.install-env` records `INSTALLER_VERSION`.
+- **Tests:** `tests/unit`, `tests/contract` and `tests/integration`.
+
+### Changed
+- **An unchanged re-run now does nothing to the running stack.** No package changes, no new key, no Docker restart and
+  no redeploy. It only checks the API and adds new projects. **The first re-run after this release still redeploys
+  once,** because of how `harbor.yml` now quotes passwords.
+- **A redeploy keeps the server key while it's still good,** and Docker restarts only when `daemon.json` changed on a
+  Docker that was already running.
+- **A re-run no longer moves Docker,** because `install_packages.sh` is now called with `--no-upgrade` once Docker is
+  installed. `DOCKER_VERSION` applies only to a new install or a bundle, so change a running Docker by hand.
+- `install_packages.sh` now defaults to tag `v1.1.0` rather than `main`. **Release install-packages v1.1.0 first,** or
+  the default won't resolve. A cached copy from another ref is fetched again.
+
+### Fixed
+- **A failed upgrade no longer leaves `.install-env` naming a version that isn't running.** `HARBOR_VERSION` now changes
+  only once the install succeeds. The installer is fetched first, so a bad version fails with nothing changed.
+- **Uninstall removes a docker group membership it added,** even after a re-run. `DOCKER_GROUP_USERS` replaces the old
+  flag, and older records are still read.
+- **An expired CA stops the run** instead of issuing certificates no client accepts, and verification now checks the
+  chain as well as the fingerprint. A server certificate can't outlive its CA.
+- **A failed `update-certificates` restores the previous certificates and restarts Harbor** instead of leaving it down.
+- **A custom database password survives a bare re-run.** It used to become `root123`, which broke Harbor. A different
+  value is now refused.
+- **An empty variable counts as not set,** so `HARBOR_PORT=` can't move an install to the defaults.
+- **Special characters in passwords** no longer break `harbor.yml`, the API check or the read-back.
+- **An upgrade now loads its images from the installer.** The old version's image archive was still in `/opt/harbor`, so
+  upstream's `install.sh` skipped `docker load`. Connected, the images quietly came from Docker Hub. **Air-gapped, a new bundle
+  over an older install failed,** and left the old version running.
+- **A downgrade is refused before anything changes.** 2.15.0 to 2.14.1 left the API at 502 and the stack down, because an
+  older Harbor can't start on a newer database. `HARBOR_ALLOW_DOWNGRADE=true` skips the check.
+- **A stale nginx no longer fails the install with a misleading 401.** On a slow host Harbor's core can crash once on first
+  boot, come back on a new address, and leave nginx sending API calls to another container. The installer now spots this
+  and restarts nginx.
+- **Air-gapped bundles include `curl`,** which the API check needs. A bundle and host with neither now fail at preflight
+  rather than after a full install.
+- README: `.cert` doesn't go in `certs.d`. The manual steps in Appendix A created the "missing key" failure.
+
 ## 2026-09-09 — Idempotence release (feature/idempotence-phase2)
 
 Idempotence, certificate-lifecycle and uninstall-correctness pass. The installer now records
