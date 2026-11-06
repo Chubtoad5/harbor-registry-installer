@@ -37,9 +37,11 @@ expired_cert() {
 }
 IP=$(hostname -I | awk '{print $1}')
 echo "$IP $CN" >> /etc/hosts
-W=$(mktemp -d); cd "$W" || exit 1
+# /var/tmp, not /tmp: Leap 16 keeps /tmp in RAM at half its size, so a 4 GB host has under 2 GB there, and the two
+# offline installers below take 1.3 GB, plus a copy of one while it installs.
+W=$(mktemp -d -p /var/tmp); cd "$W" || exit 1
 cp "$REPO/install_harbor.sh" .; chmod +x install_harbor.sh
-TGZ=$(mktemp -d)
+TGZ=$(mktemp -d -p /var/tmp)
 for v in "$OLD" "$NEW"; do curl -fsSL -o "$TGZ/$v.tgz" "https://github.com/goharbor/harbor/releases/download/v$v/harbor-offline-installer-v$v.tgz" || bad "download $v"; done
 stage() { mkdir -p harbor-install-files; [ -s "harbor-install-files/harbor-offline-installer-v$1.tgz" ] || cp "$TGZ/$1.tgz" "harbor-install-files/harbor-offline-installer-v$1.tgz"; }
 inst() { env REGISTRY_COMMON_NAME=$CN "$@" ./install_harbor.sh install-harbor >"$W/o" 2>&1; }
@@ -198,6 +200,11 @@ tar -xzf harbor-offline-package.tar.gz -O LICENSES/THIRD_PARTY_NOTICES.txt > "$W
 grep -qE '^curl(-minimal)?[_-][0-9]' "$W/notices" && ok "the licence notice lists the bundle's packages" || bad "the licence notice doesn't list curl"
 # Docker needs iptables on every distro. Without it, a bundle can't install Docker on a clean host.
 grep -qE '/iptables(_|-[0-9]|-nft-)' "$W/listing" && ok "the bundle holds iptables, which Docker needs" || bad "no iptables in the bundle, so it can't install Docker on a clean host"
+# On SUSE, Docker also needs catatonit. Up to install-packages v1.1.0, a bundle built where Docker is installed left out
+# both, so a fix that kept iptables but still dropped catatonit would pass the check above.
+case "$(. /etc/os-release; echo "$ID")" in
+  opensuse*|sles) grep -qE '/catatonit-[0-9]' "$W/listing" && ok "the bundle holds catatonit, which Docker needs on SUSE" || bad "no catatonit in the bundle, so it can't install Docker on a clean SUSE host" ;;
+esac
 grep -qi 'no GPL' "$W/notices" && bad "the licence notice still says there's no GPL" || ok "the licence notice doesn't claim there's no GPL"
 tar -tzf harbor-offline-package.tar.gz | grep -q '^LICENSES/WRITTEN_OFFER.txt$' && ok "the bundle has a written offer" || bad "no written offer in the bundle"
 env REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$OLD" ./install_harbor.sh install-harbor >"$W/o" 2>&1 && bad "H12: a stale bundle accepted another version" || ok "H12: a stale bundle still refuses another version"

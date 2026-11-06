@@ -128,7 +128,7 @@ All variables have defaults and can be overridden by exporting them before runni
 | `HARBOR_FORCE_ONLINE` | `false` | `true` ignores a `VERSION.txt` left by `offline-prep`, and stays online |
 | `HARBOR_ALLOW_DOWNGRADE` | `false` | `true` skips the check that refuses an older `HARBOR_VERSION` than the one installed. An older Harbor can't start on a newer database, so this is rarely what you want. |
 | `DOCKER_VERSION` | _(empty)_ | Docker version for a new install, or for an `offline-prep` bundle. The start of a version is enough. A Docker that's already installed is never moved. |
-| `INSTALL_PACKAGES_REF` | `v1.1.0` | Tag, branch or commit of `install_packages.sh` to fetch. `INSTALL_PACKAGES_URL` wins over it, and `INSTALL_PACKAGES_SHA256` checks it. |
+| `INSTALL_PACKAGES_REF` | `v1.1.1` | Tag, branch or commit of `install_packages.sh` to fetch. `INSTALL_PACKAGES_URL` wins over it, and `INSTALL_PACKAGES_SHA256` checks it. |
 | `MGMT_IP` | _(first `hostname -I` token)_ | Host IP used in the certificate SAN and printed URLs. Set explicitly on multi-homed hosts |
 | `PURGE_DATA` | `false` | `uninstall-harbor` only: `true` removes `/data` entirely. Default removes only the Harbor-created subpaths — safe on shared `/data` mounts |
 
