@@ -37,9 +37,11 @@ expired_cert() {
 }
 IP=$(hostname -I | awk '{print $1}')
 echo "$IP $CN" >> /etc/hosts
-W=$(mktemp -d); cd "$W" || exit 1
+# /var/tmp, not /tmp: Leap 16 keeps /tmp in RAM at half its size, so a 4 GB host has under 2 GB there, and the two
+# offline installers below take 1.3 GB, plus a copy of one while it installs.
+W=$(mktemp -d -p /var/tmp); cd "$W" || exit 1
 cp "$REPO/install_harbor.sh" .; chmod +x install_harbor.sh
-TGZ=$(mktemp -d)
+TGZ=$(mktemp -d -p /var/tmp)
 for v in "$OLD" "$NEW"; do curl -fsSL -o "$TGZ/$v.tgz" "https://github.com/goharbor/harbor/releases/download/v$v/harbor-offline-installer-v$v.tgz" || bad "download $v"; done
 stage() { mkdir -p harbor-install-files; [ -s "harbor-install-files/harbor-offline-installer-v$1.tgz" ] || cp "$TGZ/$1.tgz" "harbor-install-files/harbor-offline-installer-v$1.tgz"; }
 inst() { env REGISTRY_COMMON_NAME=$CN "$@" ./install_harbor.sh install-harbor >"$W/o" 2>&1; }
