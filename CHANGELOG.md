@@ -1,5 +1,20 @@
 # Changelog — harbor-registry-installer
 
+## v1.1.1 — 2026-11-06 — SUSE bundles hold Docker's dependencies
+
+### Fixed
+- **`offline-prep` on SLES and openSUSE, on a host that already has Docker.** The bundle left out what Docker depends on,
+  so an install from it on a clean host failed with `nothing provides 'catatonit'`. The cause was in `install-packages`,
+  which only fetched what the build host didn't have yet. `INSTALL_PACKAGES_REF` now defaults to its `v1.1.1`, which
+  fetches the whole set. On Leap 16, the bundle's packages go from 3 to about 150, about 140 MB.
+
+### Tests
+- `tests/integration` works in `/var/tmp`, not `/tmp`. Leap 16 keeps `/tmp` in RAM at half the host's memory, and the
+  two Harbor installers the test downloads filled it on a 4 GB host.
+- On SUSE, the bundle check also looks for `catatonit`, as well as `iptables`.
+
+No option, command or output changed.
+
 ## v1.1.0 — 2026-11-03 — Day-2 fixes
 
 **Tested on Ubuntu 24.04 only.** This release ships ahead of the lab's distro runs, so its RHEL and SLES paths, including the `curl-minimal` fix, have only been checked by reading.

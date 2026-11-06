@@ -200,6 +200,11 @@ tar -xzf harbor-offline-package.tar.gz -O LICENSES/THIRD_PARTY_NOTICES.txt > "$W
 grep -qE '^curl(-minimal)?[_-][0-9]' "$W/notices" && ok "the licence notice lists the bundle's packages" || bad "the licence notice doesn't list curl"
 # Docker needs iptables on every distro. Without it, a bundle can't install Docker on a clean host.
 grep -qE '/iptables(_|-[0-9]|-nft-)' "$W/listing" && ok "the bundle holds iptables, which Docker needs" || bad "no iptables in the bundle, so it can't install Docker on a clean host"
+# On SUSE, Docker also needs catatonit. Up to install-packages v1.1.0, a bundle built where Docker is installed left out
+# both, so a fix that kept iptables but still dropped catatonit would pass the check above.
+case "$(. /etc/os-release; echo "$ID")" in
+  opensuse*|sles) grep -qE '/catatonit-[0-9]' "$W/listing" && ok "the bundle holds catatonit, which Docker needs on SUSE" || bad "no catatonit in the bundle, so it can't install Docker on a clean SUSE host" ;;
+esac
 grep -qi 'no GPL' "$W/notices" && bad "the licence notice still says there's no GPL" || ok "the licence notice doesn't claim there's no GPL"
 tar -tzf harbor-offline-package.tar.gz | grep -q '^LICENSES/WRITTEN_OFFER.txt$' && ok "the bundle has a written offer" || bad "no written offer in the bundle"
 env REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$OLD" ./install_harbor.sh install-harbor >"$W/o" 2>&1 && bad "H12: a stale bundle accepted another version" || ok "H12: a stale bundle still refuses another version"
