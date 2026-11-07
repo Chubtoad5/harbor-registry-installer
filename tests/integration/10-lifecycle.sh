@@ -161,6 +161,9 @@ wait_api && api projects >/dev/null && ok "Harbor still works" || bad "Harbor is
 inst HARBOR_DB_PASSWORD=Different1 && bad "a different DB password was accepted" || ok "a different DB password is refused"
 wipe; stage "$NEW"
 
+# Spec 09, S5: the password cases are the same on every distro, and take six installs, so they run on Ubuntu 24.04 only.
+# By hand (no CI_DISTRO) they always run.
+if [[ -z "${CI_DISTRO:-}" || "$CI_DISTRO" == "Ubuntu 24.04" ]]; then
 echo "=== H7: passwords"
 for pw in 'Abc"123def' 'Abc\123def' 'Abc#123def' "Abc'123def" 'Abc: 123def'; do
   echo ">> $pw"
@@ -175,6 +178,9 @@ pw='Abc$123def'
 if inst "HARBOR_PASSWORD=$pw"; then ok "install with a dollar sign"; else echo "note: install with a dollar sign failed"; tail_o; fi
 wait_api; printf '%s' "$pw" | docker login "$CN:443" -u admin --password-stdin >/dev/null 2>&1 && ok "docker login with a dollar sign" || echo "note: docker login with a dollar sign failed"
 wipe; stage "$NEW"
+else
+  echo "SKIP  H7, the password cases: they run on Ubuntu 24.04 only (spec 09, S5)"
+fi
 
 echo "=== H11: HARBOR_USERNAME"
 inst HARBOR_USERNAME=ops HARBOR_PASSWORD=changeme && bad "a weak password was accepted" || ok "a weak password is refused"
