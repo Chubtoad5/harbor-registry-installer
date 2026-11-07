@@ -20,9 +20,16 @@ pkg_install() {
   fi
 }
 pkg_install jq iproute2 openssl
-# Really removed: with the binary only moved aside, the package manager thinks there's nothing to install.
+# Really removed: with the binary only moved aside, the package manager thinks there's nothing to install. On apt,
+# what needs curl goes too (ubuntu-server and pollinate, on a server image), as on a host that never had curl. A forced
+# removal left those depending on a missing curl, and apt, mending a broken system, wouldn't upgrade an older
+# libcurl4t64 to the bundle's: on a 24.04.4 host, curl never came back, and every later check failed (spec 11, U1).
 remove_curl() {
-  if command -v dpkg >/dev/null; then dpkg -r --force-depends curl >/dev/null 2>&1; return; fi
+  if command -v dpkg >/dev/null; then
+    echo "Removing curl and what needs it: $(apt-get remove -s curl 2>/dev/null | awk '/^Remv/ {printf "%s ", $2}')"
+    DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq curl >/dev/null 2>&1
+    return
+  fi
   local p
   for p in curl curl-minimal; do if rpm -q "$p" >/dev/null 2>&1; then echo "This host's curl package: $(rpm -q "$p")"; rpm -e --nodeps "$p" >/dev/null 2>&1; fi; done
 }
