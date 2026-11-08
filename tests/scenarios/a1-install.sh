@@ -16,11 +16,13 @@ healthy() { [ "$(curl -sk -m 10 "https://$CN/api/v2.0/health" | grep -o '"status
 within 180 healthy && ok "Harbor reports healthy" || bad "Harbor isn't healthy"
 c=$(curl -sk -m 10 -o /dev/null -w '%{http_code}' -u "admin:$PW" "https://$CN/api/v2.0/users/current"); [ "$c" = 200 ] && ok "admin logs in" || bad "admin login got $c"
 img=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -m1 '^goharbor/registry-photon:')
-if [ -n "$img" ] && printf '%s' "$PW" | docker login "$CN" -u admin --password-stdin >/dev/null 2>&1 \
-   && docker tag "$img" "$CN/library/ci-a1:1" && docker push "$CN/library/ci-a1:1" >/dev/null 2>&1; then
+# By CN:port, as the installer trusts the CA for (certs.d/<CN>:<port>)
+R="$CN:443"
+if [ -n "$img" ] && printf '%s' "$PW" | docker login "$R" -u admin --password-stdin > "$W/d" 2>&1 \
+   && docker tag "$img" "$R/library/ci-a1:1" && docker push "$R/library/ci-a1:1" >> "$W/d" 2>&1; then
   ok "push an image to it, over TLS, with no route out"
 else
-  bad "push an image to it ($img)"
+  bad "push an image to it ($img)"; tail -4 "$W/d" | cut -c1-170; ls /etc/docker/certs.d/ 2>&1 | head -3
 fi
 c=$(curl -sk -m 10 -o /dev/null -w '%{http_code}' -u "admin:$PW" "https://$CN/api/v2.0/projects/library/repositories/ci-a1"); [ "$c" = 200 ] && ok "the image is in the registry" || bad "the registry has no ci-a1 ($c)"
 ./install_harbor.sh uninstall-harbor > "$W/o" 2>&1 && ok "uninstall" || { bad "uninstall"; tail -6 "$W/o" | cut -c1-170; }
