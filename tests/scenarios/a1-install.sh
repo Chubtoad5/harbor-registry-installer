@@ -11,7 +11,7 @@ W=$(mktemp -d -p /var/tmp); cd "$W" || exit 1
 CN=reg.test.lab PW=Test-Pass-1
 grep -q " $CN\$" /etc/hosts || echo "127.0.0.1 $CN" >> /etc/hosts
 tar -xzf "$CI_HANDOFF/harbor-offline-package.tar.gz" && ok "unpack the bundle" || { bad "unpack the bundle"; echo "=== exit 1"; exit 1; }
-if env REGISTRY_COMMON_NAME=$CN HARBOR_PASSWORD=$PW ./install_harbor.sh install-harbor > "$W/o" 2>&1; then ok "install with no route out"; else bad "install with no route out"; tail -10 "$W/o" | cut -c1-170; fi
+if env REGISTRY_COMMON_NAME=$CN HARBOR_PASSWORD=$PW ./install_harbor.sh install-harbor > "$W/o" 2>&1; then ok "install with no route out"; else bad "install with no route out"; tail -10 "$W/o" | cut -c1-170; echo "  (the checks after it would only fail too)"; echo "=== exit 1"; exit 1; fi
 healthy() { [ "$(curl -sk -m 10 "https://$CN/api/v2.0/health" | grep -o '"status":"[a-z]*"' | head -1)" = '"status":"healthy"' ]; }
 within 180 healthy && ok "Harbor reports healthy" || bad "Harbor isn't healthy"
 c=$(curl -sk -m 10 -o /dev/null -w '%{http_code}' -u "admin:$PW" "https://$CN/api/v2.0/users/current"); [ "$c" = 200 ] && ok "admin logs in" || bad "admin login got $c"
