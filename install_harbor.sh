@@ -943,9 +943,9 @@ installed; on RHEL and SLES, rpm -q --licensefiles <package>). Docker's own pack
 not: its source and license are at https://github.com/moby/moby.
 
 Some of them are copyleft. On Ubuntu, that includes iptables (GPL-2.0-or-later), GnuTLS
-and librtmp (LGPL), and libidn2 (LGPL or GPL). On RHEL-family hosts, the bundle also carries
-the build host's kernel-modules-extra, part of the Linux kernel (GPL-2.0). Other systems
-differ. They are covered by WRITTEN_OFFER.txt.
+and librtmp (LGPL), and libidn2 (LGPL or GPL). On RHEL-family hosts, the bundle may also carry
+the build host's kernel-modules-extra, part of the Linux kernel (GPL-2.0), when its repos had
+it (see the list below). Other systems differ. They are covered by WRITTEN_OFFER.txt.
 
 The packages in this bundle:
 $(tar -tzf "$base_dir/harbor-install-files/apt-packages/offline-packages.tar.gz" 2>/dev/null | grep -E '\.(deb|rpm)$' | sed 's|.*/||' | sort)
