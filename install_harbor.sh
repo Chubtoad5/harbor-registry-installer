@@ -2,7 +2,7 @@
 
 # This script contains functions for installing a Harbor registry on Ubuntu for storing container images
 
-SCRIPT_VERSION="1.1.1"
+SCRIPT_VERSION="1.1.2"
 
 # Record which variables the caller explicitly set BEFORE defaults are applied, so
 # recorded install-time values from .install-env can fill in unset variables without
@@ -487,6 +487,31 @@ function install_packages_check () {
     fetch_helper "$dest" "$INSTALL_PACKAGES_URL" "$INSTALL_PACKAGES_REF" "$INSTALL_PACKAGES_SHA256"
 }
 
+# On an EL host, the running kernel's kernel-modules-extra when this host's repos still have it, so that the bundle carries
+# it. A target built from the same image then gets xt_addrtype with no local media (spec 15, F1). Prints nothing
+# elsewhere, and a note on stderr when the repos no longer have it.
+function el_modules_extra_pkg () {
+    case "$os_id" in
+        rhel|centos|rocky|almalinux|fedora) ;;
+        *) return 0 ;;
+    esac
+    local pkg
+    pkg="kernel-modules-extra-$(uname -r)"
+    if [[ -n "$(dnf -q repoquery "$pkg" 2>/dev/null)" ]]; then
+        echo "$pkg"
+    else
+        echo "  Note: $pkg isn't in this host's repos, so the bundle won't carry it. A target that lacks xt_addrtype will need it from local media." >&2
+    fi
+}
+
+# The kernel-modules-extra package the bundle carries, as kernel-modules-extra-<kernel>, or nothing
+function bundled_modules_extra () {
+    local archive="$base_dir/harbor-install-files/apt-packages/offline-packages.tar.gz" listing
+    [[ -f "$archive" ]] || return 0
+    listing=$(tar -tzf "$archive" 2>/dev/null) || return 0
+    sed -n 's#^.*/\(kernel-modules-extra-[0-9][^/]*\)\.rpm$#\1#p' <<< "$listing" | tail -n 1
+}
+
 function ensure_el_kernel_modules() {
     # EL10 ships the legacy xtables match modules (xt_addrtype et al.) in
     # kernel-modules-extra, which stock Rocky/Alma/RHEL 10 cloud images omit.
@@ -498,27 +523,38 @@ function ensure_el_kernel_modules() {
     if modprobe -n xt_addrtype &>/dev/null; then
         return 0
     fi
-    local kver
+    local kver bundled
     kver=$(uname -r)
     echo "  Kernel module xt_addrtype is unavailable (the docker daemon requires it)."
     if bundle_mode && [[ -f "$base_dir/harbor-install-files/apt-packages/offline-packages.tar.gz" ]]; then
-        echo "Error: install kernel-modules-extra for the running kernel from local media"
-        echo "  (dnf install kernel-modules-extra-$kver), then re-run this script."
-        return 1
-    fi
-    echo "  Installing kernel-modules-extra-$kver to match the running kernel..."
-    if ! dnf install -y "kernel-modules-extra-$kver"; then
-        # The running kernel's package has aged out of the repos: install the
-        # latest kernel + modules instead, which only take effect after a reboot
-        echo "  kernel-modules-extra for the running kernel is no longer available;"
-        echo "  installing the latest kernel and kernel-modules-extra..."
-        if ! dnf install -y kernel kernel-modules-extra; then
-            echo "Error: Failed to install kernel-modules-extra. Docker cannot start without the xt_addrtype module."
+        # A bundle built on a host running this same kernel carries its kernel-modules-extra (spec 15, F1)
+        bundled=$(bundled_modules_extra)
+        if [[ "$bundled" != "kernel-modules-extra-$kver" ]]; then
+            [[ -n "$bundled" ]] && echo "  The bundle carries $bundled, which is for another kernel: it was built on a host running ${bundled#kernel-modules-extra-}."
+            echo "Error: install kernel-modules-extra for the running kernel from local media"
+            echo "  (dnf install kernel-modules-extra-$kver), then re-run this script."
             return 1
         fi
-        echo "Error: A newer kernel and kernel-modules-extra were installed, but the running kernel"
-        echo "  ($kver) still has no xt_addrtype module. Reboot into the new kernel, then re-run this script."
-        return 1
+        echo "  Installing kernel-modules-extra-$kver from the bundle..."
+        if ! (cd "$base_dir/harbor-install-files/apt-packages" && ./install_packages.sh offline "kernel-modules-extra-$kver"); then
+            echo "Error: kernel-modules-extra-$kver from the bundle failed to install."
+            return 1
+        fi
+    else
+        echo "  Installing kernel-modules-extra-$kver to match the running kernel..."
+        if ! dnf install -y "kernel-modules-extra-$kver"; then
+            # The running kernel's package has aged out of the repos: install the
+            # latest kernel + modules instead, which only take effect after a reboot
+            echo "  kernel-modules-extra for the running kernel is no longer available;"
+            echo "  installing the latest kernel and kernel-modules-extra..."
+            if ! dnf install -y kernel kernel-modules-extra; then
+                echo "Error: Failed to install kernel-modules-extra. Docker cannot start without the xt_addrtype module."
+                return 1
+            fi
+            echo "Error: A newer kernel and kernel-modules-extra were installed, but the running kernel"
+            echo "  ($kver) still has no xt_addrtype module. Reboot into the new kernel, then re-run this script."
+            return 1
+        fi
     fi
     if ! modprobe xt_addrtype; then
         echo "Error: xt_addrtype still fails to load after installing kernel-modules-extra-$kver."
@@ -836,9 +872,12 @@ function apt_download_packs () {
   install_packages_check || return 1
   ensure_docker_repo || return 1
   cd "$base_dir/harbor-install-files/apt-packages" || return 1
-  # curl goes in too: the install needs it for the API check, and minimal images don't have it
-  if ! ./install_packages.sh save "${DOCKER_PACKAGES[@]}" curl; then
-    echo "Error: install_packages.sh failed to save the docker packages (${DOCKER_PACKAGES[*]})."
+  # curl goes in too: the install needs it for the API check, and minimal images don't have it. On EL, the running
+  # kernel's kernel-modules-extra too (spec 15, F1).
+  local extra
+  extra=$(el_modules_extra_pkg)
+  if ! ./install_packages.sh save "${DOCKER_PACKAGES[@]}" curl ${extra:+"$extra"}; then
+    echo "Error: install_packages.sh failed to save the docker packages (${DOCKER_PACKAGES[*]}${extra:+ $extra})."
     cd "$base_dir" || return 1
     return 1
   fi
@@ -904,8 +943,9 @@ installed; on RHEL and SLES, rpm -q --licensefiles <package>). Docker's own pack
 not: its source and license are at https://github.com/moby/moby.
 
 Some of them are copyleft. On Ubuntu, that includes iptables (GPL-2.0-or-later), GnuTLS
-and librtmp (LGPL), and libidn2 (LGPL or GPL). Other systems differ. They are covered by
-WRITTEN_OFFER.txt.
+and librtmp (LGPL), and libidn2 (LGPL or GPL). On RHEL-family hosts, the bundle also carries
+the build host's kernel-modules-extra, part of the Linux kernel (GPL-2.0). Other systems
+differ. They are covered by WRITTEN_OFFER.txt.
 
 The packages in this bundle:
 $(tar -tzf "$base_dir/harbor-install-files/apt-packages/offline-packages.tar.gz" 2>/dev/null | grep -E '\.(deb|rpm)$' | sed 's|.*/||' | sort)

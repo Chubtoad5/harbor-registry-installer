@@ -539,7 +539,9 @@ The connected host must be running the **same OS and version** as the target.
    ```
 
    This will:
-   - Download Docker CE packages for your OS
+   - Download Docker CE packages for your OS. On Rocky, Alma or RHEL 10, whose images leave out `kernel-modules-extra`
+     (Docker needs its `xt_addrtype`), also the package for the connected host's running kernel. The install uses it when
+     the target runs that same kernel, as a target built from the same image does.
    - Download the Harbor offline installer tarball
    - Bundle everything into `harbor-offline-package.tar.gz`
 
