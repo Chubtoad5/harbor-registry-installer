@@ -10,6 +10,10 @@
   for, and which package to bring. The online path is unchanged. The bundle's licence notice now names that package
   as GPL-2.0, and the written offer covers it as before.
 
+- **A Leap 16 bundle installs Docker on a clean host with SELinux enforcing** (spec 15, F7). `INSTALL_PACKAGES_REF` now
+  defaults to `install-packages` v1.1.3, whose SUSE `save` also takes what the build host's packages make required, such as
+  Docker's `container-selinux`. Before, zypper offered to remove the host's SELinux policy, and the install stopped.
+
 ### Tests
 - `tests/unit/el-modules.bats`: what `offline-prep` adds on EL and elsewhere, both bundle-install outcomes, and the online path.
 

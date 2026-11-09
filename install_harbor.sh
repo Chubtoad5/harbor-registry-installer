@@ -37,7 +37,7 @@ HARBOR_ALLOW_DOWNGRADE=${HARBOR_ALLOW_DOWNGRADE:-false}
 # Optional Docker version, used when Docker isn't installed yet. The start of a version is enough.
 DOCKER_VERSION=${DOCKER_VERSION:-""}
 # Which install_packages.sh to fetch: a tag, branch or commit. The URL wins over the ref, and the checksum is optional.
-INSTALL_PACKAGES_REF=${INSTALL_PACKAGES_REF:-"v1.1.1"}
+INSTALL_PACKAGES_REF=${INSTALL_PACKAGES_REF:-"v1.1.3"}
 INSTALL_PACKAGES_URL=${INSTALL_PACKAGES_URL:-"https://raw.githubusercontent.com/Chubtoad5/install-packages/${INSTALL_PACKAGES_REF}/install_packages.sh"}
 INSTALL_PACKAGES_SHA256=${INSTALL_PACKAGES_SHA256:-""}
 # uninstall-harbor: 'true' removes /data entirely; default removes only the
