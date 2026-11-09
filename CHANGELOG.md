@@ -1,5 +1,22 @@
 # Changelog — harbor-registry-installer
 
+## v1.1.2 — 2026-11-09 — Air-gapped Docker on Rocky 10's image kernel
+
+### Fixed
+- **An air-gapped install on Rocky, Alma or RHEL 10 no longer stops for `kernel-modules-extra`** (spec 15, F1). Those
+  images leave it out, and the Docker daemon needs its `xt_addrtype`. `offline-prep` on an EL host now also bundles
+  `kernel-modules-extra-$(uname -r)` when the build host's repos still have it, and a bundle install installs it from
+  the bundle when the target runs that same kernel. On another kernel the message names the kernel the bundle was built
+  for, and which package to bring. The online path is unchanged. The bundle's licence notice now names that package
+  as GPL-2.0, and the written offer covers it as before.
+
+- **A Leap 16 bundle installs Docker on a clean host with SELinux enforcing** (spec 15, F7). `INSTALL_PACKAGES_REF` now
+  defaults to `install-packages` v1.1.3, whose SUSE `save` also takes what the build host's packages make required, such as
+  Docker's `container-selinux`. Before, zypper offered to remove the host's SELinux policy, and the install stopped.
+
+### Tests
+- `tests/unit/el-modules.bats`: what `offline-prep` adds on EL and elsewhere, both bundle-install outcomes, and the online path.
+
 ## v1.1.1 — 2026-11-06 — SUSE bundles hold Docker's dependencies
 
 ### Fixed
