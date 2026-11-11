@@ -130,11 +130,11 @@ cert_days() { echo $(( ($(date -d "$(openssl x509 -noout -enddate -in "$1" | cut
   [ "$(cert_days "$certs_dir/reg.example.crt")" -ge 363 ]
   [ "$(cert_days "$certs_dir/reg.example.crt")" -le 365 ]
 }
-@test "H15: unset, CA_DURATION_DAYS takes DURATION_DAYS' value" {
+@test "H20: unset, CA_DURATION_DAYS is 3650, whatever DURATION_DAYS is; H19: DURATION_DAYS defaults to 730" {
   run env -u CA_DURATION_DAYS DURATION_DAYS=400 bash -c 'source "$1"; echo "$CA_DURATION_DAYS"' _ "$BATS_TEST_DIRNAME/../../install_harbor.sh"
-  [ "$output" = "400" ]
+  [ "$output" = "3650" ]
   run env -u CA_DURATION_DAYS -u DURATION_DAYS bash -c 'source "$1"; echo "$CA_DURATION_DAYS $DURATION_DAYS"' _ "$BATS_TEST_DIRNAME/../../install_harbor.sh"
-  [ "$output" = "3650 3650" ]
+  [ "$output" = "3650 730" ]
 }
 @test "H15: an existing CA keeps its lifetime" {
   make_ca 100
@@ -163,9 +163,27 @@ cert_days() { echo $(( ($(date -d "$(openssl x509 -noout -enddate -in "$1" | cut
 }
 @test "H15: with a CA kept, a shorter CA_DURATION_DAYS isn't refused, since it doesn't apply" {
   make_ca 100
-  DURATION_DAYS=5000; CA_DURATION_DAYS=3650; ROTATE_CA=false
+  DURATION_DAYS=700; CA_DURATION_DAYS=500; ROTATE_CA=false
   check_durations
   ROTATE_CA=true
   run check_durations
   [ "$status" -eq 1 ]
+}
+@test "H19: a DURATION_DAYS over 730 is lowered to 730, with a warning that says why" {
+  DURATION_DAYS=3650; CA_DURATION_DAYS=3650
+  check_durations > "$certs_dir/out"
+  [ "$DURATION_DAYS" = 730 ]
+  grep -q "WARNING: DURATION_DAYS=3650 is over 730" "$certs_dir/out"
+  grep -q "825 days" "$certs_dir/out"
+  ca_gen >/dev/null; server_cert_gen >/dev/null
+  [ "$(cert_days "$certs_dir/reg.example.crt")" -le 730 ]
+  [ "$(cert_days "$certs_dir/ca.crt")" -ge 3648 ]
+}
+@test "H19: 730 or less is left as it is, with no warning" {
+  for d in 730 365 31; do
+    DURATION_DAYS=$d; CA_DURATION_DAYS=3650
+    run check_durations
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+  done
 }

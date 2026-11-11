@@ -1,5 +1,22 @@
 # Changelog — harbor-registry-installer
 
+## v1.3.0 — 2026-11-11 — Server certificates capped at 730 days; the CA keeps ten years
+
+Spec 19 (chubtoad-automation).
+
+### Changed
+- **`DURATION_DAYS` defaults to 730, and a larger value is lowered to 730 with a warning** (H19). Apple devices reject
+  a TLS server certificate valid for more than 825 days, even under a private CA, so the 3650-day default broke
+  Harbor's web UI in Safari and on iOS and macOS. Docker, containerd, Podman and Helm don't check, so pulls and pushes
+  were fine. A value is lowered rather than refused, so callers that send more keep working.
+- **`CA_DURATION_DAYS` defaults to 3650 on its own** (H20). In v1.2.0 it took `DURATION_DAYS`' value, which with
+  H19's default would have made a two-year CA. An existing CA keeps its lifetime.
+- **Existing certificates are kept.** A re-run doesn't replace a long one. `NEW_CERT_GEN=1 ... update-certificates`
+  issues a 730-day one under the same CA; the README says so.
+
+### Tests
+- `tests/unit/certificates.bats`: the lowering and its warning, 730 or less untouched, and both defaults.
+
 ## v1.2.0 — 2026-11-11 — CA lifetime, upgrade dumps, old images, compose-safe passwords
 
 Spec 18 (chubtoad-automation), asked for by registry-tech-ops' Phase B.
