@@ -118,14 +118,16 @@ All variables have defaults and can be overridden by exporting them before runni
 | `HARBOR_PORT` | `443` | HTTPS port for the registry |
 | `HARBOR_USERNAME` | `admin` | System administrator account. Harbor can't rename `admin`, so another name creates a second administrator with the same password, and `admin` stays. It needs 8 to 128 characters with a lowercase letter, an uppercase letter and a number. |
 | `HARBOR_USER_EMAIL` | `<HARBOR_USERNAME>@<REGISTRY_COMMON_NAME>` | Email for that account |
-| `HARBOR_PASSWORD` | `Harbor12345` | Admin password (change after first login). **Only applied on the very first install** — see [Changing the Admin Password](#changing-the-admin-password) |
-| `HARBOR_DB_PASSWORD` | `root123` | Harbor's internal PostgreSQL password. Known limitation: the default is the Harbor-upstream `root123`; override it for production use. Written into `harbor.yml` (root-only, mode 600) |
+| `HARBOR_PASSWORD` | `Harbor12345` | Admin password (change after first login). **Only applied on the very first install** — see [Changing the Admin Password](#changing-the-admin-password). Some characters are refused: see [Passwords](#passwords) |
+| `HARBOR_DB_PASSWORD` | `root123` | Harbor's internal PostgreSQL password. Known limitation: the default is the Harbor-upstream `root123`; override it for production use. Written into `harbor.yml` (root-only, mode 600). See [Passwords](#passwords) |
 | `DOCKER_BRIDGE_CIDR` | `172.30.0.1/16` | Docker bridge CIDR (`bip`). Merged into an existing `/etc/docker/daemon.json` (via `jq`/`python3`) — never clobbers other settings; skipped if `bip` is already defined |
 | `PROJECTS` | _(empty)_ | Space-separated list of Harbor projects to create |
 | `HARBOR_API_WAIT_SEC` | `60` | How long to wait for the Harbor API after (re)starting it |
 | `LICENSE_OFFER_CONTACT` | the Chubtoad5 project | Who the air-gap bundle's written offer tells people to ask for source code |
 | `HARBOR_FORCE_REDEPLOY` | `false` | `true` runs the full install even when nothing has changed |
 | `HARBOR_FORCE_ONLINE` | `false` | `true` ignores a `VERSION.txt` left by `offline-prep`, and stays online |
+| `HARBOR_DB_DUMP` | `true` | Before a version change, dump Harbor's database to `/data/backup/harbor-installer/`. `false` skips the dump. See [Upgrading Harbor](#upgrading-harbor) |
+| `HARBOR_REMOVE_OLD_IMAGES` | `true` | After a successful version change, remove the `goharbor/*` images of other versions that no container uses. `false` keeps them |
 | `HARBOR_ALLOW_DOWNGRADE` | `false` | `true` skips the check that refuses an older `HARBOR_VERSION` than the one installed. An older Harbor can't start on a newer database, so this is rarely what you want. |
 | `DOCKER_VERSION` | _(empty)_ | Docker version for a new install, or for an `offline-prep` bundle. The start of a version is enough. A Docker that's already installed is never moved. |
 | `INSTALL_PACKAGES_REF` | `v1.1.3` | Tag, branch or commit of `install_packages.sh` to fetch. `INSTALL_PACKAGES_URL` wins over it, and `INSTALL_PACKAGES_SHA256` checks it. |
@@ -141,7 +143,8 @@ All variables have defaults and can be overridden by exporting them before runni
 | `LOCATION` | `BOSTON` | Certificate locality |
 | `ORGANIZATION` | `SELF` | Certificate organization |
 | `REGISTRY_COMMON_NAME` | `registry.edge.lab` | FQDN for the registry certificate (the historical `regsitry.edge.lab` typo default is fixed; existing installs are handled via the recorded install state, see below) |
-| `DURATION_DAYS` | `3650` | Certificate validity in days |
+| `DURATION_DAYS` | `3650` | Server certificate validity in days. It's never issued for longer than the CA has left |
+| `CA_DURATION_DAYS` | `DURATION_DAYS`' value | Lifetime of a CA the installer makes: on a first install, or with `ROTATE_CA=true`. An existing CA keeps its own. It can't be shorter than `DURATION_DAYS`. For a one-year certificate under a ten-year CA: `DURATION_DAYS=365 CA_DURATION_DAYS=3650` |
 
 ### Certificate Update Options
 
@@ -246,6 +249,11 @@ Only `ca.crt` is placed in `/etc/docker/certs.d/<FQDN>:<PORT>/`. The server priv
 there, and a `.cert` without its key makes every `docker login` fail with "missing key". Either one left
 by an older version is cleaned up on the next `install-harbor` or `update-certificates`.
 
+The CA's lifetime is `CA_DURATION_DAYS`, and the server certificate's is `DURATION_DAYS`. Unset,
+`CA_DURATION_DAYS` takes `DURATION_DAYS`' value, as both did before v1.2.0. A short server certificate under a
+long CA (say 365 days under 3650) means a yearly renewal keeps the CA, so clients keep trusting it. Changing
+`CA_DURATION_DAYS` later doesn't touch an existing CA: it applies the next time one is made.
+
 An expired CA stops `install-harbor` and `update-certificates` (with `NEW_CERT_GEN=1`) before anything
 changes. `ROTATE_CA=true` replaces it, and every client must then trust the new one. A warning appears
 when the CA has fewer than `CA_EXPIRY_WARN_DAYS` left (default 30). A server certificate is never issued
@@ -264,6 +272,79 @@ The server key survives a redeploy while it's still good: valid against the CA, 
 `HARBOR_PASSWORD` and `HARBOR_DB_PASSWORD` apply on a first install only. A re-run keeps the values in
 `harbor.yml`. A different `HARBOR_DB_PASSWORD` is refused, because the database keeps the one it was
 created with.
+
+### Passwords
+
+`harbor.yml` gets each password exactly, whatever it contains. But Harbor's `prepare` also writes them into env
+files under `/opt/harbor/common/config/`, which docker compose reads with its own rules. Compose expands `$name`,
+cuts a value at a `#` after a space, trims spaces at either end, and reads a leading quote as quoting. So an admin
+password with any of these would give `admin` a different password, and the install would fail with a 401.
+
+`HARBOR_PASSWORD` is refused before anything changes when it has:
+- a `$` before a letter, `_`, `{` or another `$` (`$1`, `$-` and a trailing `$` are fine);
+- a `#` after a space (`a#b` is fine);
+- a space at the start or the end;
+- a `"` or `'` at the start.
+
+Control characters were refused already. `HARBOR_DB_PASSWORD` with any of these only gets a warning: every
+container that uses it reads the same file, so Harbor works, but Postgres gets a shorter password than the one
+passed.
+
+An install made with such an admin password before v1.2.0 has the password compose produced. Log in with that,
+then change it in the UI. For example, `Abc$xyz9Q #1` became `Abc`.
+
+### Upgrading Harbor
+
+An upgrade is a re-run with a newer `HARBOR_VERSION`. Harbor migrates its database when it starts, and an older
+Harbor can't start on a migrated database, so a downgrade is refused. Two things happen around a version change:
+
+- **Before it, a database dump.** `pg_dumpall` from `harbor-db`, compressed, to
+  `/data/backup/harbor-installer/harbor-db-v<old version>-<UTC time>.sql.gz` (the folder is 700, the file 600).
+  It comes after the new version's download, so a version that doesn't exist fails first, and before anything
+  changes. A failed or empty dump stops the run. If Harbor is down, the installed version's database is started
+  alone for it. The dump is small: Harbor's database is tens of MB. An install never removes dumps, and
+  `uninstall-harbor` removes them with the rest of Harbor's data. `HARBOR_DB_DUMP=false` skips it.
+- **After it succeeds, the old images go.** Every `goharbor/*` image not tagged for the running version, and
+  not used by a container, is removed: a 2.14.1 set frees about 3.8 GB. A failed upgrade removes nothing. The old
+  version's offline installer stays in `harbor-install-files/`, because a rollback needs it: delete it once the
+  upgrade is trusted. `HARBOR_REMOVE_OLD_IMAGES=false` keeps the images.
+
+### Restoring the database after a failed upgrade
+
+A failed upgrade can leave Harbor down, on a database the new version has already migrated. To go back to the
+old version with the dump made before the upgrade (tested from 2.15.0 back to 2.14.1):
+
+```bash
+# 1. Stop Harbor, and set the migrated database aside
+sudo systemctl stop harbor-docker
+sudo mv /data/database /data/database.failed-$(date -u +%Y%m%d%H%M%S)
+
+# 2. Reinstall the old version on an empty database, with the settings it had. HARBOR_DB_PASSWORD must be the
+#    one the install was made with (database: password: in /opt/harbor/harbor.yml), or root123 if none was set
+sudo HARBOR_VERSION=<old version> HARBOR_DB_PASSWORD='<as before>' REGISTRY_COMMON_NAME=<as before> \
+  ./install_harbor.sh install-harbor
+
+# 3. Load the dump into the database alone
+sudo systemctl stop harbor-docker
+sudo docker compose -f /opt/harbor/docker-compose.yml up -d postgresql
+sudo docker exec harbor-db pg_isready -U postgres     # repeat until it says "accepting connections"
+sudo sh -c 'gzip -dc /data/backup/harbor-installer/harbor-db-v<old version>-<time>.sql.gz \
+  | docker exec -i harbor-db psql -U postgres -d postgres -q'
+
+# 4. Start Harbor
+sudo systemctl start harbor-docker
+```
+
+- **Step 2** needs the old version's offline installer in `harbor-install-files/`. The upgrade keeps it. Online, it's
+  downloaded again if it's gone. Air-gapped, keep the old bundle until the upgrade is trusted.
+- **Step 3** prints two errors, which are expected: `current user cannot be dropped` and `role "postgres" already
+  exists`. Users, projects, robot accounts and image records come back as they were before the upgrade.
+- **Images** pushed after the upgrade keep their files in `/data/registry`, but the restored database doesn't list
+  them: push them again.
+- **Afterwards,** a re-run with the old version says "No change". Delete `/data/database.failed-*` once the restore
+  is trusted: `uninstall-harbor` doesn't remove it.
+- **These steps are for the installer's own dumps,** made with `pg_dumpall --clean --if-exists`, so they load over
+  the fresh database step 2 makes.
 
 ### Running Behind a Proxy
 
@@ -304,7 +385,7 @@ sudo systemctl restart docker
 
 ### Data Persistence
 
-Harbor stores all registry data under `/data` and configuration under `/opt/harbor`. Back up these directories before any upgrade or uninstall operation.
+Harbor stores all registry data under `/data` and configuration under `/opt/harbor`. Back up these directories before any upgrade or uninstall operation. A version change dumps the database first (see [Upgrading Harbor](#upgrading-harbor)), but images and other files aren't in that dump.
 
 ### Changing the Admin Password
 
@@ -320,8 +401,9 @@ only when the installer added it. For installs made before `.install-env` existe
 removes exactly those `/etc/docker/certs.d/*` entries whose `ca.crt` byte-matches the installed Harbor CA.
 
 `/data` handling: by default only the Harbor-created subpaths are removed (`ca_download`, `database`,
-`job_logs`, `redis`, `registry`, `secret`, `trivy-adapter`, `chart_storage`) so a shared `/data` mount is
-never destroyed. Set `PURGE_DATA=true` to remove `/data` entirely.
+`job_logs`, `redis`, `registry`, `secret`, `trivy-adapter`, `chart_storage`, and the database dumps in
+`backup/harbor-installer`) so a shared `/data` mount is never destroyed. `/data/backup` itself goes only when
+nothing else is left in it. Set `PURGE_DATA=true` to remove `/data` entirely.
 
 Docker itself, `/etc/docker/daemon.json`, and the Docker repo configuration are intentionally **not**
 removed.

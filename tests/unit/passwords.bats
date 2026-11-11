@@ -105,3 +105,34 @@ teardown() { rm -f /opt/harbor/harbor.yml; }
   user_set_harbor_db_password=x
   check_existing_db_password
 }
+# H16: measured with docker compose v5.6.1 reading an env file, as Harbor's containers read theirs
+COMPOSE_CHANGES=('Abc$xyz9Q' 'Abc${x}9Q' 'Abc$$9Q' 'Abc$_x9Q' 'Abc #123def' 'Abc  #x' ' Abc123def' 'Abc123def ' '"Abc"123def' "'Abc'123def" '"Abc123def' 'P$a"s \w`x #y: z9')
+COMPOSE_KEEPS=('Abc$123def' 'Abc$' 'Abc$-9Q' 'Abc$ x' 'Abc$.x' 'Abc#123def' '#Abc123def' 'Abc"123def' "Abc'123def" 'Abc\123def' 'Abc: 123def' 'Abc 123def' 'Harbor12345')
+@test "H16: an admin password docker compose would change is refused, and says why" {
+  for pw in "${COMPOSE_CHANGES[@]}"; do
+    HARBOR_PASSWORD=$pw; HARBOR_DB_PASSWORD=root123
+    run check_passwords
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Nothing has been changed"* ]]
+    # The message never prints the password itself
+    [[ "$output" != *"$pw"* ]]
+  done
+}
+@test "H16: one compose reads back unchanged is accepted" {
+  for pw in "${COMPOSE_KEEPS[@]}"; do
+    HARBOR_PASSWORD=$pw; HARBOR_DB_PASSWORD=root123
+    run check_passwords
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+  done
+}
+@test "H16: a database password compose would change warns, and isn't refused" {
+  HARBOR_PASSWORD=Harbor12345; HARBOR_DB_PASSWORD='Db$xyz9Q #1x'
+  run check_passwords
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING: HARBOR_DB_PASSWORD"* ]]
+}
+@test "H16: the rule matches each case compose was measured on" {
+  for pw in "${COMPOSE_CHANGES[@]}"; do compose_changes "$pw" >/dev/null; done
+  for pw in "${COMPOSE_KEEPS[@]}"; do ! compose_changes "$pw" >/dev/null || false; done
+}

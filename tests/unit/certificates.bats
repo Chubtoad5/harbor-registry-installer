@@ -120,3 +120,44 @@ good_cert() { ca_gen >/dev/null; server_cert_gen >/dev/null; }
   [ "$status" -eq 1 ]
   [[ "$output" == *"doesn't verify"* ]]
 }
+cert_days() { echo $(( ($(date -d "$(openssl x509 -noout -enddate -in "$1" | cut -d= -f2)" +%s) - $(date +%s)) / 86400 )); }
+@test "H15: a new CA lives CA_DURATION_DAYS, and the server certificate DURATION_DAYS" {
+  DURATION_DAYS=365; CA_DURATION_DAYS=3650
+  ca_gen >/dev/null
+  server_cert_gen >/dev/null
+  [ "$(cert_days "$certs_dir/ca.crt")" -ge 3648 ]
+  [ "$(cert_days "$certs_dir/ca.crt")" -le 3650 ]
+  [ "$(cert_days "$certs_dir/reg.example.crt")" -ge 363 ]
+  [ "$(cert_days "$certs_dir/reg.example.crt")" -le 365 ]
+}
+@test "H15: unset, CA_DURATION_DAYS takes DURATION_DAYS' value" {
+  run env -u CA_DURATION_DAYS DURATION_DAYS=400 bash -c 'source "$1"; echo "$CA_DURATION_DAYS"' _ "$BATS_TEST_DIRNAME/../../install_harbor.sh"
+  [ "$output" = "400" ]
+  run env -u CA_DURATION_DAYS -u DURATION_DAYS bash -c 'source "$1"; echo "$CA_DURATION_DAYS $DURATION_DAYS"' _ "$BATS_TEST_DIRNAME/../../install_harbor.sh"
+  [ "$output" = "3650 3650" ]
+}
+@test "H15: an existing CA keeps its lifetime" {
+  make_ca 100
+  before=$(sha256sum "$certs_dir/ca.crt")
+  CA_DURATION_DAYS=3650
+  ca_gen >/dev/null
+  [ "$(sha256sum "$certs_dir/ca.crt")" = "$before" ]
+}
+@test "H15: a CA shorter than its certificate, or a value that isn't a whole number, is refused" {
+  DURATION_DAYS=365; CA_DURATION_DAYS=100
+  run check_durations
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"shorter than DURATION_DAYS"* ]]
+  for bad in 0 -5 abc 3.5 ""; do
+    DURATION_DAYS=365; CA_DURATION_DAYS=$bad
+    run check_durations
+    [ "$status" -eq 1 ]
+    DURATION_DAYS=$bad; CA_DURATION_DAYS=3650
+    run check_durations
+    [ "$status" -eq 1 ]
+  done
+  DURATION_DAYS=365; CA_DURATION_DAYS=365
+  check_durations
+  DURATION_DAYS=365; CA_DURATION_DAYS=3650
+  check_durations
+}
