@@ -112,3 +112,20 @@ esac'
   [ "$status" -eq 0 ]
   [[ "$output" == *"WARNING: couldn't remove goharbor/harbor-core:v2.14.1"* ]]
 }
+@test "H17: a failed dump stops the database it started, so nothing has changed" {
+  mkdir -p /opt/harbor; touch /opt/harbor/docker-compose.yml
+  stub docker 'case "$1 $2" in "inspect -f") echo false ;; "exec harbor-db") [ "$3" = pg_dumpall ] && exit 1 ;; esac; exit 0'
+  run dump_database_before_upgrade
+  rm -f /opt/harbor/docker-compose.yml
+  [ "$status" -eq 1 ]
+  called 'compose -f /opt/harbor/docker-compose.yml up -d postgresql'
+  called 'compose -f /opt/harbor/docker-compose.yml stop'
+}
+@test "H18: a retried upgrade, with the containers already at the new version, still removes the old images" {
+  printf '%s\n' goharbor/harbor-core:v2.15.0 goharbor/harbor-core:v2.14.1 > "$IMAGES"
+  previous_version=2.15.0; recorded_version=2.14.1
+  touch "$base_dir/harbor-install-files/harbor-offline-installer-v2.14.1.tgz"
+  run remove_old_images
+  called 'rmi goharbor/harbor-core:v2.14.1'
+  [[ "$output" == *"harbor-offline-installer-v2.14.1.tgz"* ]]
+}

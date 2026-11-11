@@ -161,3 +161,11 @@ cert_days() { echo $(( ($(date -d "$(openssl x509 -noout -enddate -in "$1" | cut
   DURATION_DAYS=365; CA_DURATION_DAYS=3650
   check_durations
 }
+@test "H15: with a CA kept, a shorter CA_DURATION_DAYS isn't refused, since it doesn't apply" {
+  make_ca 100
+  DURATION_DAYS=5000; CA_DURATION_DAYS=3650; ROTATE_CA=false
+  check_durations
+  ROTATE_CA=true
+  run check_durations
+  [ "$status" -eq 1 ]
+}

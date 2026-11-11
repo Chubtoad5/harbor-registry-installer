@@ -8,17 +8,19 @@ Spec 18 (chubtoad-automation), asked for by registry-tech-ops' Phase B.
 - **`CA_DURATION_DAYS`, a CA lifetime apart from the server certificate's** (H15). `DURATION_DAYS` is now the server
   certificate's lifetime only. Unset, `CA_DURATION_DAYS` takes `DURATION_DAYS`' value, so nothing changes for a caller
   that doesn't set it. It applies when a CA is made (a first install, or `ROTATE_CA=true`): an existing CA keeps its
-  lifetime. A value shorter than `DURATION_DAYS`, or either one not a whole number of days, is refused before anything
-  changes. `DURATION_DAYS=365 CA_DURATION_DAYS=3650` gives a yearly renewal under the same ten-year CA.
+  lifetime, and a server certificate is still capped at what it has left. When a CA is being made, a
+  `CA_DURATION_DAYS` shorter than `DURATION_DAYS` is refused before anything changes, and either one that isn't a whole
+  number of days always is. `DURATION_DAYS=365 CA_DURATION_DAYS=3650` gives a yearly renewal under the same ten-year CA.
 - **A database dump before every version change** (H17). `pg_dumpall --clean --if-exists` from `harbor-db`, to
   `/data/backup/harbor-installer/harbor-db-v<old version>-<UTC time>.sql.gz` (folder 700, file 600). It runs after the
   new version's download and before anything changes. A failed or empty dump, or too little space, stops the run with
-  nothing changed. A Harbor that's down gets its database started alone for it. `HARBOR_DB_DUMP=false` skips it.
+  nothing changed. A Harbor that's down gets its database started alone for it, and stopped again if the dump fails.
+  `HARBOR_DB_DUMP=false` skips it.
   `uninstall-harbor` removes the dumps. The README's new "Restoring the database after a failed upgrade" has the
   steps, tested from 2.15.0 back to 2.14.1.
 - **Other versions' images are removed after a successful version change** (H18). Every `goharbor/*` image not tagged
   for the running version and not used by a container: a 2.14.1 set frees about 3.8 GB. A failed upgrade removes
-  nothing, and the old version's offline installer stays for a rollback. `HARBOR_REMOVE_OLD_IMAGES=false` keeps them.
+  nothing, and a retry that then succeeds does. The old version's offline installer stays for a rollback. `HARBOR_REMOVE_OLD_IMAGES=false` keeps them.
 
 ### Fixed
 - **An admin password that docker compose changes is refused** (H16). Harbor's `prepare` writes the passwords into

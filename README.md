@@ -144,7 +144,7 @@ All variables have defaults and can be overridden by exporting them before runni
 | `ORGANIZATION` | `SELF` | Certificate organization |
 | `REGISTRY_COMMON_NAME` | `registry.edge.lab` | FQDN for the registry certificate (the historical `regsitry.edge.lab` typo default is fixed; existing installs are handled via the recorded install state, see below) |
 | `DURATION_DAYS` | `3650` | Server certificate validity in days. It's never issued for longer than the CA has left |
-| `CA_DURATION_DAYS` | `DURATION_DAYS`' value | Lifetime of a CA the installer makes: on a first install, or with `ROTATE_CA=true`. An existing CA keeps its own. It can't be shorter than `DURATION_DAYS`. For a one-year certificate under a ten-year CA: `DURATION_DAYS=365 CA_DURATION_DAYS=3650` |
+| `CA_DURATION_DAYS` | `DURATION_DAYS`' value | Lifetime of a CA the installer makes: on a first install, or with `ROTATE_CA=true`. An existing CA keeps its own. A CA being made can't be shorter than `DURATION_DAYS`. For a one-year certificate under a ten-year CA: `DURATION_DAYS=365 CA_DURATION_DAYS=3650` |
 
 ### Certificate Update Options
 
@@ -317,12 +317,14 @@ old version with the dump made before the upgrade (tested from 2.15.0 back to 2.
 ```bash
 # 1. Stop Harbor, and set the migrated database aside
 sudo systemctl stop harbor-docker
+sudo cp -p /opt/harbor/harbor.yml /root/harbor.yml.before-restore     # the passwords step 2 needs
 sudo mv /data/database /data/database.failed-$(date -u +%Y%m%d%H%M%S)
 
-# 2. Reinstall the old version on an empty database, with the settings it had. HARBOR_DB_PASSWORD must be the
-#    one the install was made with (database: password: in /opt/harbor/harbor.yml), or root123 if none was set
-sudo HARBOR_VERSION=<old version> HARBOR_DB_PASSWORD='<as before>' REGISTRY_COMMON_NAME=<as before> \
-  ./install_harbor.sh install-harbor
+# 2. Reinstall the old version on an empty database, with the settings it had. Both passwords must be the ones in
+#    /opt/harbor/harbor.yml (harbor_admin_password, and database: password:), so harbor.yml keeps them: the dump
+#    restores the database's own, and a later re-run reads harbor.yml's
+sudo HARBOR_VERSION=<old version> HARBOR_PASSWORD='<as before>' HARBOR_DB_PASSWORD='<as before>' \
+  REGISTRY_COMMON_NAME=<as before> ./install_harbor.sh install-harbor
 
 # 3. Load the dump into the database alone
 sudo systemctl stop harbor-docker
@@ -335,7 +337,8 @@ sudo sh -c 'gzip -dc /data/backup/harbor-installer/harbor-db-v<old version>-<tim
 sudo systemctl start harbor-docker
 ```
 
-- **Step 2** needs the old version's offline installer in `harbor-install-files/`. The upgrade keeps it. Online, it's
+- **Step 2** must pass the same `HARBOR_USERNAME`, `HARBOR_PORT` and other settings the install had, if they weren't
+  the defaults. It needs the old version's offline installer in `harbor-install-files/`. The upgrade keeps it. Online, it's
   downloaded again if it's gone. Air-gapped, keep the old bundle until the upgrade is trusted.
 - **Step 3** prints two errors, which are expected: `current user cannot be dropped` and `role "postgres" already
   exists`. Users, projects, robot accounts and image records come back as they were before the upgrade.

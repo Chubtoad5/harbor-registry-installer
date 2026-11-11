@@ -207,19 +207,20 @@ if inst "HARBOR_PASSWORD=$pw"; then ok "install with a dollar sign"; else bad "i
 wait_api; printf '%s' "$pw" | docker login "$CN:443" -u admin --password-stdin >/dev/null 2>&1 && ok "docker login with a dollar sign" || bad "docker login with a dollar sign"
 wipe; stage "$NEW"
 
-echo "=== H17: the README's restore steps, $NEW back to $OLD"
+echo "=== H17: the README's restore steps, $NEW back to $OLD, with passwords that aren't the defaults"
+RP=Restore-Pass1
 stage "$OLD"
-inst HARBOR_VERSION="$OLD" PROJECTS=demo HARBOR_DB_PASSWORD=CustomDb1 && ok "install $OLD" || { bad "install $OLD"; tail_o; }
-wait_api; docker login "$CN:443" -u admin -p Harbor12345 >/dev/null 2>&1
+inst HARBOR_VERSION="$OLD" PROJECTS=demo HARBOR_PASSWORD=$RP HARBOR_DB_PASSWORD=CustomDb1 && ok "install $OLD" || { bad "install $OLD"; tail_o; }
+wait_api; docker login "$CN:443" -u admin -p "$RP" >/dev/null 2>&1
 docker tag alpine:3.20 "$CN:443/demo/alpine:3.20"; docker push -q "$CN:443/demo/alpine:3.20" >/dev/null && ok "pushed an image on $OLD" || bad "push on $OLD failed"
 inst HARBOR_VERSION="$NEW" PROJECTS=demo && ok "upgrade to $NEW" || { bad "upgrade to $NEW"; tail_o; }
 wait_api
-curl -sk -m 10 -K <(printf 'user = "admin:Harbor12345"\n') -H 'Content-Type: application/json' -d '{"project_name":"after"}' -o /dev/null "https://$CN:443/api/v2.0/projects"
-api projects | jq -r '.[].name' | grep -qx after && ok "a project made on $NEW" || bad "couldn't make a project on $NEW"
+curl -sk -m 10 -K <(printf 'user = "admin:%s"\n' "$RP") -H 'Content-Type: application/json' -d '{"project_name":"after"}' -o /dev/null "https://$CN:443/api/v2.0/projects"
+PW=$RP api projects | jq -r '.[].name' | grep -qx after && ok "a project made on $NEW" || bad "couldn't make a project on $NEW"
 d=$(find /data/backup/harbor-installer -name "harbor-db-v$OLD-*.sql.gz" 2>/dev/null | sort | tail -1)
 systemctl stop harbor-docker
 mv /data/database /data/database.failed-ci
-inst HARBOR_VERSION="$OLD" HARBOR_DB_PASSWORD=CustomDb1 && ok "step 2: reinstall $OLD on an empty database" || { bad "step 2 failed"; tail_o; }
+inst HARBOR_VERSION="$OLD" HARBOR_PASSWORD=$RP HARBOR_DB_PASSWORD=CustomDb1 && ok "step 2: reinstall $OLD on an empty database" || { bad "step 2 failed"; tail_o; }
 systemctl stop harbor-docker
 docker compose -f /opt/harbor/docker-compose.yml up -d postgresql >/dev/null 2>&1
 for _ in $(seq 1 30); do docker exec harbor-db pg_isready -U postgres >/dev/null 2>&1 && break; sleep 2; done
@@ -228,11 +229,11 @@ errs=$(grep -c ERROR "$W/psql")
 [ "$errs" = 2 ] && grep -q 'current user cannot be dropped' "$W/psql" && grep -q 'role "postgres" already exists' "$W/psql" && ok "step 3: the dump loads, with only the two expected errors" || { bad "step 3: $errs errors"; grep ERROR "$W/psql" | head -4; }
 systemctl start harbor-docker
 wait_api
-api systeminfo | jq -r .harbor_version | grep -q "v$OLD" && ok "H17: $OLD runs again" || bad "H17: running $(api systeminfo | jq -r .harbor_version)"
-names=$(api projects | jq -r '.[].name')
+PW=$RP api systeminfo | jq -r .harbor_version | grep -q "v$OLD" && ok "H17: $OLD runs again, and admin has its password" || bad "H17: running $(PW=$RP api systeminfo | jq -r .harbor_version)"
+names=$(PW=$RP api projects | jq -r '.[].name')
 grep -qx demo <<< "$names" && ! grep -qx after <<< "$names" && ok "H17: the projects are as before the upgrade" || bad "H17: projects: $(tr '\n' ' ' <<< "$names")"
 docker rmi -f "$CN:443/demo/alpine:3.20" >/dev/null 2>&1; docker pull -q "$CN:443/demo/alpine:3.20" >/dev/null && ok "H17: the image pushed on $OLD pulls" || bad "H17: the image pushed on $OLD doesn't pull"
-inst HARBOR_VERSION="$OLD" && grep -q 'No change' "$W/o" && ok "H17: a re-run at $OLD says No change" || { bad "H17: a re-run at $OLD didn't say No change"; tail_o; }
+inst HARBOR_VERSION="$OLD" && grep -q 'No change' "$W/o" && ok "H17: a re-run at $OLD, passing no password, says No change" || { bad "H17: a re-run at $OLD, passing no password, failed or redeployed"; tail_o; }
 rm -rf /data/database.failed-ci
 wipe; stage "$NEW"
 else
