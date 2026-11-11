@@ -1,5 +1,42 @@
 # Changelog — harbor-registry-installer
 
+## v1.2.0 — 2026-11-11 — CA lifetime, upgrade dumps, old images, compose-safe passwords
+
+Spec 18 (chubtoad-automation), asked for by registry-tech-ops' Phase B.
+
+### Added
+- **`CA_DURATION_DAYS`, a CA lifetime apart from the server certificate's** (H15). `DURATION_DAYS` is now the server
+  certificate's lifetime only. Unset, `CA_DURATION_DAYS` takes `DURATION_DAYS`' value, so nothing changes for a caller
+  that doesn't set it. It applies when a CA is made (a first install, or `ROTATE_CA=true`): an existing CA keeps its
+  lifetime, and a server certificate is still capped at what it has left. When a CA is being made, a
+  `CA_DURATION_DAYS` shorter than `DURATION_DAYS` is refused before anything changes, and either one that isn't a whole
+  number of days always is. `DURATION_DAYS=365 CA_DURATION_DAYS=3650` gives a yearly renewal under the same ten-year CA.
+- **A database dump before every version change** (H17). `pg_dumpall --clean --if-exists` from `harbor-db`, to
+  `/data/backup/harbor-installer/harbor-db-v<old version>-<UTC time>.sql.gz` (folder 700, file 600). It runs after the
+  new version's download and before anything changes. A failed or empty dump, or too little space, stops the run with
+  nothing changed. A Harbor that's down gets its database started alone for it, and stopped again if the dump fails.
+  `HARBOR_DB_DUMP=false` skips it.
+  `uninstall-harbor` removes the dumps. The README's new "Restoring the database after a failed upgrade" has the
+  steps, tested from 2.15.0 back to 2.14.1.
+- **Other versions' images are removed after a successful version change** (H18). Every `goharbor/*` image not tagged
+  for the running version and not used by a container: a 2.14.1 set frees about 3.8 GB. A failed upgrade removes
+  nothing, and a retry that then succeeds does. The old version's offline installer stays for a rollback. `HARBOR_REMOVE_OLD_IMAGES=false` keeps them.
+
+### Fixed
+- **An admin password that docker compose changes is refused** (H16). Harbor's `prepare` writes the passwords into
+  env files that compose reads by its own rules: it expands `$name`, cuts at a `#` after a space, trims both ends and
+  reads a leading quote as quoting. So `admin` got a different password, and the install failed with a 401 (seen with
+  `` P$a"s \w`x #y: z9 ``, which became `` P"s \w`x ``). `HARBOR_PASSWORD` with a `$` before a letter, `_`, `{` or
+  `$`, a `#` after a space, a space at either end, or a leading quote now stops the run before anything changes.
+  `$1`, `a#b` and inner quotes still work. `HARBOR_DB_PASSWORD` gets a warning only: compose changes it the same way
+  in every file that holds it, so Harbor works, with a shorter password.
+
+### Tests
+- `tests/unit/upgrade.bats` (H17, H18), and H15 and H16 cases in `certificates.bats` and `passwords.bats`.
+- `tests/integration`: a ten-year CA with a one-year certificate; the upgrade's dump and image removal; no dump on a
+  re-run, a bad version or a refused downgrade; the H16 refusals change nothing; the dollar-sign case is now a real
+  check; and, on Ubuntu 24.04, the README's restore steps from 2.15.0 back to 2.14.1.
+
 ## v1.1.2 — 2026-11-09 — Air-gapped Docker on Rocky 10's image kernel
 
 ### Fixed

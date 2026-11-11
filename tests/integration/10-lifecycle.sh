@@ -61,11 +61,19 @@ started() { docker inspect -f '{{.State.StartedAt}}' harbor-core nginx | tr '\n'
 dockerts() { systemctl show docker -p ActiveEnterTimestamp --value; }
 env_value() { sed -n "s/^$1=//p" /opt/harbor/.install-env; }
 tail_o() { tail -4 "$W/o" | cut -c1-170; }
+days_left() { echo $(( ($(date -d "$(openssl x509 -noout -enddate -in "$1" | cut -d= -f2)" +%s) - $(date +%s)) / 86400 )); }
+dumps() { find /data/backup/harbor-installer -name 'harbor-db-v*.sql.gz' 2>/dev/null | wc -l; }
+# A dump that gzip accepts and that starts like pg_dumpall's. Read into a variable: with pipefail, head would fail gzip.
+good_dump() { local h; gzip -t "$1" 2>/dev/null || return 1; h=$(gzip -dc "$1" 2>/dev/null | head -c 4096 || true); grep -q 'PostgreSQL database cluster dump' <<< "$h"; }
+old_images() { docker images --format '{{.Repository}}:{{.Tag}}' | grep "^goharbor/.*:v$1\$"; }
 
 useradd -m -s /bin/bash cisudo 2>/dev/null
 echo "=== first install, and an upgrade with data"
 stage "$OLD"
-if env SUDO_USER=cisudo REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$OLD" PROJECTS=demo ./install_harbor.sh install-harbor >"$W/o" 2>&1; then ok "install $OLD"; else bad "install $OLD"; tail_o; fi
+if env SUDO_USER=cisudo REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$OLD" PROJECTS=demo DURATION_DAYS=365 CA_DURATION_DAYS=3650 ./install_harbor.sh install-harbor >"$W/o" 2>&1; then ok "install $OLD"; else bad "install $OLD"; tail_o; fi
+cad=$(days_left /opt/harbor/certs/ca.crt); crd=$(days_left "/opt/harbor/certs/$CN.crt")
+[ "$cad" -ge 3648 ] && [ "$cad" -le 3650 ] && [ "$crd" -ge 363 ] && [ "$crd" -le 365 ] && ok "H15: a ten-year CA and a one-year certificate" || bad "H15: the CA has $cad days, the certificate $crd"
+[ "$(dumps)" = 0 ] && ok "H17: a first install makes no dump" || bad "H17: a first install made a dump"
 [ "$(env_value HARBOR_VERSION)" = "$OLD" ] && ok "H1: version recorded after success" || bad "H1: recorded $(env_value HARBOR_VERSION)"
 [ "$(env_value DOCKER_GROUP_USERS)" = "cisudo" ] && ok "H2: group user recorded" || bad "H2: recorded '$(env_value DOCKER_GROUP_USERS)'"
 wait_api; docker login "$CN:443" -u admin -p Harbor12345 >/dev/null 2>&1 && ok "docker login right after install, with no Docker restart" || bad "docker login failed"
@@ -82,10 +90,20 @@ docker rmi -f "$CN:443/demo/alpine:3.20" >/dev/null 2>&1; docker pull -q "$CN:44
 [ "$D" = "$(dockerts)" ] && ok "H10: the upgrade didn't restart Docker" || bad "H10: the upgrade restarted Docker"
 [ "$(env_value HARBOR_VERSION)" = "$NEW" ] && ok "H1: new version recorded after success" || bad "H1: recorded $(env_value HARBOR_VERSION)"
 [ "$(env_value DOCKER_GROUP_USERS)" = "cisudo" ] && ok "H2: a re-run kept the group user" || bad "H2: now '$(env_value DOCKER_GROUP_USERS)'"
+d=$(find /data/backup/harbor-installer -name "harbor-db-v$OLD-*.sql.gz" 2>/dev/null | head -1)
+[ -n "$d" ] && good_dump "$d" && ok "H17: the upgrade left a dump of $OLD's database" || bad "H17: no valid dump of $OLD's database"
+[ -n "$d" ] && [ "$(stat -c %a "$d")" = 600 ] && [ "$(stat -c %a /data/backup/harbor-installer)" = 700 ] && ok "H17: the dump is private" || bad "H17: the dump's modes are $(stat -c %a "$d" /data/backup/harbor-installer 2>&1 | tr '\n' ' ')"
+grep -q 'Restoring the database after a failed upgrade' "$W/o" && ok "H17: the log names the restore steps" || bad "H17: the log doesn't name the restore steps"
+[ -z "$(old_images "$OLD")" ] && ok "H18: $OLD's images are gone" || bad "H18: left behind: $(old_images "$OLD" | tr '\n' ' ')"
+[ "$(old_images "$NEW" | wc -l)" -ge 9 ] && ok "H18: $NEW's images are there" || bad "H18: $NEW has $(old_images "$NEW" | wc -l) images"
+grep -q "Removed .* goharbor image(s) of earlier Harbor versions" "$W/o" && ok "H18: the log says what it removed" || bad "H18: nothing said about the removal"
+[ -s "harbor-install-files/harbor-offline-installer-v$OLD.tgz" ] && ok "H18: $OLD's offline installer is kept for a rollback" || bad "H18: $OLD's offline installer is gone"
 
 echo "=== H10: an unchanged re-run"
-K=$(keyhash); S=$(started); D=$(dockerts)
-if env SUDO_USER=cisudo REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$NEW" PROJECTS="demo extra" ./install_harbor.sh install-harbor >"$W/o" 2>&1; then ok "re-run exit 0"; else bad "re-run failed"; tail_o; fi
+K=$(keyhash); S=$(started); D=$(dockerts); N=$(dumps); C=$(sha256sum /opt/harbor/certs/ca.crt | cut -c1-16)
+if env SUDO_USER=cisudo REGISTRY_COMMON_NAME=$CN HARBOR_VERSION="$NEW" PROJECTS="demo extra" CA_DURATION_DAYS=7300 ./install_harbor.sh install-harbor >"$W/o" 2>&1; then ok "re-run exit 0"; else bad "re-run failed"; tail_o; fi
+[ "$N" = "$(dumps)" ] && ok "H17: no dump on a re-run" || bad "H17: a re-run made a dump"
+[ "$C" = "$(sha256sum /opt/harbor/certs/ca.crt | cut -c1-16)" ] && ok "H15: a different CA_DURATION_DAYS keeps the CA" || bad "H15: the CA changed"
 grep -q 'No change: Harbor is running as requested' "$W/o" && ok "it says nothing changed" || bad "it didn't take the no-change path"
 [ "$K" = "$(keyhash)" ] && ok "key kept" || bad "key replaced"
 [ "$S" = "$(started)" ] && ok "containers not restarted" || bad "containers restarted"
@@ -101,15 +119,18 @@ S=$(started); inst HARBOR_VERSION="$NEW" HARBOR_FORCE_REDEPLOY=true && ok "force
 wait_api
 
 echo "=== H1: a bad version changes nothing"
-K=$(keyhash); S=$(started)
+K=$(keyhash); S=$(started); N=$(dumps); I=$(docker images -q | sort | tr '\n' ' ')
 inst HARBOR_VERSION=2.99.0 && bad "a bad version exited 0" || ok "a bad version fails"
+[ "$N" = "$(dumps)" ] && ok "H17: it stopped before the dump" || bad "H17: it made a dump"
+[ "$I" = "$(docker images -q | sort | tr '\n' ' ')" ] && ok "H18: it removed no image" || bad "H18: the images changed"
 [ "$(env_value HARBOR_VERSION)" = "$NEW" ] && ok "the record still says $NEW" || bad "the record says $(env_value HARBOR_VERSION)"
 [ "$K" = "$(keyhash)" ] && ok "key untouched" || bad "key replaced"
 [ "$S" = "$(started)" ] && ok "stack untouched" || bad "stack restarted"
 
 echo "=== HC2: a downgrade changes nothing"
-K=$(keyhash); S=$(started)
+K=$(keyhash); S=$(started); N=$(dumps)
 inst HARBOR_VERSION="$OLD" && bad "a downgrade exited 0" || ok "a downgrade is refused"
+[ "$N" = "$(dumps)" ] && ok "H17: no dump for a refused downgrade" || bad "H17: a refused downgrade made a dump"
 grep -q 'older' "$W/o" && ok "it says why" || bad "no reason given"
 [ "$K" = "$(keyhash)" ] && [ "$S" = "$(started)" ] && ok "nothing changed" || bad "something changed"
 
@@ -180,14 +201,50 @@ for pw in 'Abc"123def' 'Abc\123def' 'Abc#123def' "Abc'123def" 'Abc: 123def'; do
   env NEW_CERT_GEN=1 ./install_harbor.sh update-certificates >"$W/o" 2>&1 && ok "update-certificates reads it back" || { bad "update-certificates with $pw"; tail_o; }
   wipe; stage "$NEW"
 done
-echo ">> a dollar sign"
+echo ">> a dollar sign before a digit, which docker compose leaves alone (H16)"
 pw='Abc$123def'
-if inst "HARBOR_PASSWORD=$pw"; then ok "install with a dollar sign"; else echo "note: install with a dollar sign failed"; tail_o; fi
-wait_api; printf '%s' "$pw" | docker login "$CN:443" -u admin --password-stdin >/dev/null 2>&1 && ok "docker login with a dollar sign" || echo "note: docker login with a dollar sign failed"
+if inst "HARBOR_PASSWORD=$pw"; then ok "install with a dollar sign"; else bad "install with a dollar sign"; tail_o; fi
+wait_api; printf '%s' "$pw" | docker login "$CN:443" -u admin --password-stdin >/dev/null 2>&1 && ok "docker login with a dollar sign" || bad "docker login with a dollar sign"
+wipe; stage "$NEW"
+
+echo "=== H17: the README's restore steps, $NEW back to $OLD, with passwords that aren't the defaults"
+RP=Restore-Pass1
+stage "$OLD"
+inst HARBOR_VERSION="$OLD" PROJECTS=demo HARBOR_PASSWORD=$RP HARBOR_DB_PASSWORD=CustomDb1 && ok "install $OLD" || { bad "install $OLD"; tail_o; }
+wait_api; docker login "$CN:443" -u admin -p "$RP" >/dev/null 2>&1
+docker tag alpine:3.20 "$CN:443/demo/alpine:3.20"; docker push -q "$CN:443/demo/alpine:3.20" >/dev/null && ok "pushed an image on $OLD" || bad "push on $OLD failed"
+inst HARBOR_VERSION="$NEW" PROJECTS=demo && ok "upgrade to $NEW" || { bad "upgrade to $NEW"; tail_o; }
+wait_api
+curl -sk -m 10 -K <(printf 'user = "admin:%s"\n' "$RP") -H 'Content-Type: application/json' -d '{"project_name":"after"}' -o /dev/null "https://$CN:443/api/v2.0/projects"
+PW=$RP api projects | jq -r '.[].name' | grep -qx after && ok "a project made on $NEW" || bad "couldn't make a project on $NEW"
+d=$(find /data/backup/harbor-installer -name "harbor-db-v$OLD-*.sql.gz" 2>/dev/null | sort | tail -1)
+systemctl stop harbor-docker
+mv /data/database /data/database.failed-ci
+inst HARBOR_VERSION="$OLD" HARBOR_PASSWORD=$RP HARBOR_DB_PASSWORD=CustomDb1 && ok "step 2: reinstall $OLD on an empty database" || { bad "step 2 failed"; tail_o; }
+systemctl stop harbor-docker
+docker compose -f /opt/harbor/docker-compose.yml up -d postgresql >/dev/null 2>&1
+for _ in $(seq 1 30); do docker exec harbor-db pg_isready -U postgres >/dev/null 2>&1 && break; sleep 2; done
+gzip -dc "$d" | docker exec -i harbor-db psql -U postgres -d postgres -q >"$W/psql" 2>&1
+errs=$(grep -c ERROR "$W/psql")
+[ "$errs" = 2 ] && grep -q 'current user cannot be dropped' "$W/psql" && grep -q 'role "postgres" already exists' "$W/psql" && ok "step 3: the dump loads, with only the two expected errors" || { bad "step 3: $errs errors"; grep ERROR "$W/psql" | head -4; }
+systemctl start harbor-docker
+wait_api
+PW=$RP api systeminfo | jq -r .harbor_version | grep -q "v$OLD" && ok "H17: $OLD runs again, and admin has its password" || bad "H17: running $(PW=$RP api systeminfo | jq -r .harbor_version)"
+names=$(PW=$RP api projects | jq -r '.[].name')
+grep -qx demo <<< "$names" && ! grep -qx after <<< "$names" && ok "H17: the projects are as before the upgrade" || bad "H17: projects: $(tr '\n' ' ' <<< "$names")"
+docker rmi -f "$CN:443/demo/alpine:3.20" >/dev/null 2>&1; docker pull -q "$CN:443/demo/alpine:3.20" >/dev/null && ok "H17: the image pushed on $OLD pulls" || bad "H17: the image pushed on $OLD doesn't pull"
+inst HARBOR_VERSION="$OLD" && grep -q 'No change' "$W/o" && ok "H17: a re-run at $OLD, passing no password, says No change" || { bad "H17: a re-run at $OLD, passing no password, failed or redeployed"; tail_o; }
+rm -rf /data/database.failed-ci
 wipe; stage "$NEW"
 else
   echo "SKIP  H7, the password cases: they run on Ubuntu 24.04 only (spec 09, S5)"
 fi
+
+echo "=== H16: admin passwords docker compose would change are refused"
+for pw in 'Abc$xyz9Q' 'Abc #123def' ' Abc123def' '"Abc123def'; do
+  inst "HARBOR_PASSWORD=$pw" && bad "accepted [$pw]" || { grep -q 'Nothing has been changed' "$W/o" && ok "refused [$pw]" || { bad "[$pw] failed without the refusal"; tail_o; }; }
+done
+[ -e /opt/harbor/.install-env ] && bad "H16: a refusal changed something" || ok "H16: the refusals changed nothing"
 
 echo "=== H11: HARBOR_USERNAME"
 inst HARBOR_USERNAME=ops HARBOR_PASSWORD=changeme && bad "a weak password was accepted" || ok "a weak password is refused"

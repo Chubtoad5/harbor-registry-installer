@@ -2,7 +2,7 @@
 
 # This script contains functions for installing a Harbor registry on Ubuntu for storing container images
 
-SCRIPT_VERSION="1.1.2"
+SCRIPT_VERSION="1.2.0"
 
 # Record which variables the caller explicitly set BEFORE defaults are applied, so
 # recorded install-time values from .install-env can fill in unset variables without
@@ -34,6 +34,10 @@ HARBOR_FORCE_REDEPLOY=${HARBOR_FORCE_REDEPLOY:-false}
 # true = ignore a harbor-install-files/VERSION.txt left by offline-prep, and stay online
 HARBOR_FORCE_ONLINE=${HARBOR_FORCE_ONLINE:-false}
 HARBOR_ALLOW_DOWNGRADE=${HARBOR_ALLOW_DOWNGRADE:-false}
+# A version change dumps Harbor's database first, to /data/backup/harbor-installer. false skips the dump.
+HARBOR_DB_DUMP=${HARBOR_DB_DUMP:-true}
+# After a successful version change, remove the goharbor/* images of other versions. false keeps them.
+HARBOR_REMOVE_OLD_IMAGES=${HARBOR_REMOVE_OLD_IMAGES:-true}
 # Optional Docker version, used when Docker isn't installed yet. The start of a version is enough.
 DOCKER_VERSION=${DOCKER_VERSION:-""}
 # Which install_packages.sh to fetch: a tag, branch or commit. The URL wins over the ref, and the checksum is optional.
@@ -51,6 +55,8 @@ LOCATION=${LOCATION:-"BOSTON"}
 ORGANIZATION=${ORGANIZATION:-"SELF"}
 REGISTRY_COMMON_NAME=${REGISTRY_COMMON_NAME:-"registry.edge.lab"}
 DURATION_DAYS=${DURATION_DAYS:-"3650"}
+# Lifetime of a CA this installer makes: a first install, or ROTATE_CA. Unset, it's DURATION_DAYS. An existing CA keeps its own.
+CA_DURATION_DAYS=${CA_DURATION_DAYS:-$DURATION_DAYS}
 # Replace the CA. Every client must then trust the new one, so this never happens by itself.
 ROTATE_CA=${ROTATE_CA:-false}
 CA_EXPIRY_WARN_DAYS=${CA_EXPIRY_WARN_DAYS:-30}
@@ -79,6 +85,11 @@ certs_dir="/opt/harbor/certs"
 install_env_file="/opt/harbor/.install-env"
 docker_certs_root="/etc/docker/certs.d"
 data_dir="/data"
+db_dump_dir="$data_dir/backup/harbor-installer"
+# The Harbor version running before this run, when data already existed, and the one the last successful run recorded:
+# set by install_harbor. A failed upgrade can leave the containers at the new version while the record keeps the old.
+previous_version=""
+recorded_version=""
 data_preexisting=0
 recorded_install_files_dir=""
 recorded_docker_users=""
@@ -92,9 +103,12 @@ bridge_changed=0
 function install_harbor {
   # Called directly rather than through run_step: at DEBUG=0 it would hide why the run stopped
   check_passwords || exit 1
+  check_durations || exit 1
   check_harbor_username || exit 1
   if [[ -d "$data_dir/database" ]]; then
     data_preexisting=1
+    previous_version=$(running_harbor_version)
+    recorded_version=$(get_install_env_value HARBOR_VERSION)
     echo "  NOTE: Existing Harbor data found in $data_dir."
     echo "  HARBOR_PASSWORD is only applied on the very first install - the admin"
     echo "  password already stored in $data_dir remains in effect for this install."
@@ -112,6 +126,8 @@ function install_harbor {
   else
     # Fetch first, so a bad version fails before anything has changed
     run_step prefetch_harbor_installer
+    # Called directly: at DEBUG=0 run_step would hide why the run stopped, or where the dump went
+    dump_database_before_upgrade || exit 1
     run_step write_install_env
     run_step install_docker_utility
     run_step cert_gen
@@ -121,6 +137,7 @@ function install_harbor {
     run_step create_harbor_service
     run_step create_harbor_projects
     run_step commit_install_version
+    remove_old_images
   fi
   echo "# ---  Harbor Install Completed! --- #"
   echo "  Harbor install and compose files are in /opt/harbor and /data directories"
@@ -210,11 +227,13 @@ function remove_harbor_data () {
     rm -rf "$data_dir"
     return 0
   fi
-  local harbor_subdirs=(ca_download database job_logs redis registry secret trivy-adapter chart_storage)
+  local harbor_subdirs=(ca_download database job_logs redis registry secret trivy-adapter chart_storage backup/harbor-installer)
   local sub
   for sub in "${harbor_subdirs[@]}"; do
     [[ -e "$data_dir/$sub" ]] && rm -rf "${data_dir:?}/$sub"
   done
+  # Only when empty: another tool's backups may share it
+  rmdir "$data_dir/backup" 2>/dev/null || true
   rmdir "$data_dir" 2>/dev/null || true
   echo "  Removed Harbor-created paths under $data_dir (set PURGE_DATA=true to remove $data_dir entirely)"
 }
@@ -240,6 +259,7 @@ function update_certificates {
   preserve_existing_yml_passwords
   # A user-supplied CA replaces this one, and is a way out of an expired one, so only self-signed renewals check it
   if [[ "$NEW_CERT_GEN" -eq 1 ]]; then
+    check_durations || exit 1
     check_existing_ca || exit 1
   fi
   # Anything from here on can be rolled back, and the snapshot has to come first:
@@ -719,12 +739,12 @@ function ca_gen () {
     echo "  Restore the missing file, or remove both to generate a fresh CA (remote clients must then re-trust it)."
     return 1
   fi
-  echo "  Generating a new certificate authority (valid $DURATION_DAYS days)..."
+  echo "  Generating a new certificate authority (valid $CA_DURATION_DAYS days)..."
   mkdir -p "$certs_dir"
   # Generate CA key
   openssl genrsa -out "$certs_dir/ca.key" 4096 || return 1
   # Generate CA certificate
-  openssl req -x509 -new -nodes -sha512 -days "$DURATION_DAYS" -subj "/C=$COUNTRY/ST=$STATE/L=$LOCATION/O=$ORGANIZATION/CN=$REGISTRY_COMMON_NAME" -key "$certs_dir/ca.key" -out "$certs_dir/ca.crt" || return 1
+  openssl req -x509 -new -nodes -sha512 -days "$CA_DURATION_DAYS" -subj "/C=$COUNTRY/ST=$STATE/L=$LOCATION/O=$ORGANIZATION/CN=$REGISTRY_COMMON_NAME" -key "$certs_dir/ca.key" -out "$certs_dir/ca.crt" || return 1
 }
 
 # server_cert_reusable: is the existing key and certificate still right for this install?
@@ -1120,14 +1140,71 @@ function check_existing_db_password () {
   fi
 }
 
+# compose_changes <value>: what docker compose would change in this value, read from an env file as Harbor's are (H16).
+# Prints the first reason and returns 0, or returns 1 when compose reads it back unchanged. Measured on compose v5.6.1:
+# it expands $name, ${name} and $$, cuts at a # after a space, trims both ends, and reads a leading quote as quoting.
+function compose_changes () {
+  local v=$1 dollar='[$][A-Za-z_{$]'
+  if [[ "$v" =~ $dollar ]]; then
+    echo 'a $ before a letter, _, { or $'
+  elif [[ "$v" == *" #"* ]]; then
+    echo 'a # after a space'
+  elif [[ "$v" == [[:blank:]]* || "$v" == *[[:blank:]] ]]; then
+    echo 'a space or tab at the start or end'
+  elif [[ "$v" == [\"\']* ]]; then
+    echo 'a quote at the start'
+  else
+    return 1
+  fi
+}
+
 function check_passwords () {
-  local value
+  local value why
   for value in "$HARBOR_PASSWORD" "$HARBOR_DB_PASSWORD"; do
     if [[ "$value" == *[[:cntrl:]]* ]]; then
       echo "Error: HARBOR_PASSWORD and HARBOR_DB_PASSWORD can't contain control characters."
       return 1
     fi
   done
+  # Harbor's prepare writes the passwords into env files that docker compose reads by its own rules, so admin
+  # would get a different password, and the installer's API calls a 401. Only the values passed reach this check:
+  # a re-run reads harbor.yml's afterwards.
+  if why=$(compose_changes "$HARBOR_PASSWORD"); then
+    echo "Error: HARBOR_PASSWORD has $why. Harbor would create admin with a different password,"
+    echo "  because docker compose changes that when it reads Harbor's env files. Nothing has been changed."
+    echo "  Not allowed: a \$ before a letter, _, { or \$; a # after a space; a space or tab at the start or end; a quote at the start."
+    return 1
+  fi
+  # The database password goes through the same rule in every file that holds it, so Harbor works, with a shorter one
+  if why=$(compose_changes "$HARBOR_DB_PASSWORD"); then
+    echo "  WARNING: HARBOR_DB_PASSWORD has $why. Harbor works, but docker compose gives Postgres a shorter"
+    echo "  password than the one passed. Avoid a \$ before a letter, _, { or \$, a # after a space, spaces at either end, and a leading quote."
+  fi
+  return 0
+}
+
+# DURATION_DAYS is the server certificate's lifetime, CA_DURATION_DAYS a new CA's (H15)
+function check_durations () {
+  local name value
+  for name in DURATION_DAYS CA_DURATION_DAYS; do
+    value=${!name}
+    if [[ ! "$value" =~ ^[0-9]+$ ]] || (( 10#$value < 1 )); then
+      echo "Error: $name must be a whole number of days, at least 1 (got '$value'). Nothing has been changed."
+      return 1
+    fi
+  done
+  # Only a CA made now takes CA_DURATION_DAYS. An existing one keeps its lifetime, and a certificate is capped at what it has left.
+  ca_will_be_made || return 0
+  if (( 10#$CA_DURATION_DAYS < 10#$DURATION_DAYS )); then
+    echo "Error: CA_DURATION_DAYS ($CA_DURATION_DAYS) is shorter than DURATION_DAYS ($DURATION_DAYS), and a certificate"
+    echo "  can't outlive its CA. Nothing has been changed. Unset, CA_DURATION_DAYS takes DURATION_DAYS' value."
+    return 1
+  fi
+}
+
+# ca_will_be_made: no CA yet, or ROTATE_CA asks for a new one
+function ca_will_be_made () {
+  [[ ! -s "$certs_dir/ca.crt" || ! -s "$certs_dir/ca.key" || "${ROTATE_CA,,}" == "true" ]]
 }
 
 # Harbor's rule for new users: 8 to 128 characters, with a lowercase letter, an uppercase letter and a number
@@ -1291,6 +1368,128 @@ EOF
 function commit_install_version () {
   set_install_env_value HARBOR_VERSION "$HARBOR_VERSION"
   set_install_env_value HARBOR_VERSION_REQUESTED ""
+}
+
+# --- Version changes (H17, H18) --- #
+
+# version_changing: data existed, and the version running before this run isn't the one asked for (or can't be told)
+function version_changing () {
+  [[ $data_preexisting -eq 1 && "$previous_version" != "$HARBOR_VERSION" ]]
+}
+
+# H17: dump the database before anything changes, so a failed upgrade can be rolled back. A failed or empty dump
+# stops the run. Restore steps: README, "Restoring the database after a failed upgrade".
+function dump_database_before_upgrade () {
+  version_changing || return 0
+  local from=${previous_version:-unknown} need free dump head_text
+  if [[ "${HARBOR_DB_DUMP,,}" == "false" ]]; then
+    echo "  WARNING: HARBOR_DB_DUMP=false: changing Harbor $from to $HARBOR_VERSION with no database dump."
+    echo "  A failed upgrade can't be rolled back without one."
+    return 0
+  fi
+  echo "  Harbor $from to $HARBOR_VERSION: dumping the database first..."
+  need=$(du -sk "$data_dir/database" 2>/dev/null | cut -f1)
+  free=$(df -Pk "$data_dir" 2>/dev/null | awk 'NR==2 {print $4}')
+  if [[ ! "$need" =~ ^[0-9]+$ || ! "$free" =~ ^[0-9]+$ ]] || (( free < need )); then
+    echo "Error: the database dump needs up to $(( ${need:-0} / 1024 )) MB free on $data_dir, and $(( ${free:-0} / 1024 )) MB is free."
+    echo "  Nothing has been changed. Free some space, or set HARBOR_DB_DUMP=false to upgrade without a dump."
+    return 1
+  fi
+  started_db=0
+  if [[ "$(docker inspect -f '{{.State.Running}}' harbor-db 2>/dev/null)" != "true" ]]; then
+    if [[ ! -f /opt/harbor/docker-compose.yml ]]; then
+      echo "Error: harbor-db isn't running and /opt/harbor/docker-compose.yml is gone, so the database can't be dumped."
+      echo "  Nothing has been changed. HARBOR_DB_DUMP=false upgrades without a dump."
+      return 1
+    fi
+    echo "  harbor-db isn't running: starting the installed version's database alone, for the dump..."
+    [[ "$(docker inspect -f '{{.State.Running}}' harbor-log 2>/dev/null)" == "true" ]] && log_was_running=1
+    docker compose -f /opt/harbor/docker-compose.yml up -d postgresql > /dev/null 2>&1 || true
+    started_db=1
+  fi
+  local attempt
+  for attempt in {1..30}; do
+    docker exec harbor-db pg_isready -U postgres > /dev/null 2>&1 && break
+    sleep 2
+  done
+  if ! (umask 077; mkdir -p "$db_dump_dir") || ! chmod 700 "$db_dump_dir"; then
+    stop_started_db
+    echo "Error: can't create $db_dump_dir. Nothing has been changed."
+    return 1
+  fi
+  dump="$db_dump_dir/harbor-db-v$from-$(date -u +%Y%m%d%H%M%S).sql.gz"
+  # --clean --if-exists, so the dump loads over the fresh database a reinstall makes (README)
+  if ! (set -o pipefail; umask 077; docker exec harbor-db pg_dumpall -U postgres --clean --if-exists | gzip > "$dump"); then
+    rm -f "$dump"
+    stop_started_db
+    echo "Error: the database dump to $dump failed. Nothing has been changed."
+    return 1
+  fi
+  head_text=$(gzip -dc "$dump" 2>/dev/null | head -c 4096 || true)
+  if ! gzip -t "$dump" 2>/dev/null || ! grep -q 'PostgreSQL database cluster dump' <<< "$head_text"; then
+    stop_started_db
+    echo "Error: the database dump $dump is empty or incomplete. Nothing has been changed."
+    return 1
+  fi
+  echo "  Dumped Harbor $from's database to $dump ($(du -h "$dump" | cut -f1))."
+  echo "  To roll back a failed upgrade, see the README: Restoring the database after a failed upgrade."
+}
+
+# stop_started_db: when the dump started the database and then failed, stop what it started (the database, and the
+# log service it depends on if that wasn't running), and leave the rest of Harbor as it was
+started_db=0
+log_was_running=0
+function stop_started_db () {
+  [[ $started_db -eq 1 ]] || return 0
+  docker compose -f /opt/harbor/docker-compose.yml stop postgresql > /dev/null 2>&1 || true
+  [[ $log_was_running -eq 1 ]] || docker compose -f /opt/harbor/docker-compose.yml stop log > /dev/null 2>&1 || true
+  started_db=0
+}
+
+# old_harbor_images: goharbor/* images of other versions that no container uses, one per line
+function old_harbor_images () {
+  local keep="v$HARBOR_VERSION" used img
+  used=$(docker ps -a --format '{{.Image}}' 2>/dev/null)
+  while read -r img; do
+    [[ -n "$img" && "$img" != *":<none>" && "${img##*:}" != "$keep" ]] || continue
+    grep -qxF "$img" <<< "$used" && continue
+    echo "$img"
+  done < <(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep '^goharbor/' || true)
+}
+
+# H18: after a successful version change, free the space the other versions' images take. Never fails the run.
+# The record counts too: a retry after a failed upgrade finds the containers at the new version already.
+function remove_old_images () {
+  version_changing || { [[ $data_preexisting -eq 1 && -n "$recorded_version" && "$recorded_version" != "$HARBOR_VERSION" ]]; } || return 0
+  if [[ "${HARBOR_REMOVE_OLD_IMAGES,,}" == "false" ]]; then
+    echo "  HARBOR_REMOVE_OLD_IMAGES=false: keeping the goharbor images of earlier versions."
+    return 0
+  fi
+  local images=() img removed=0 root before after
+  readarray -t images < <(old_harbor_images)
+  [[ ${#images[@]} -gt 0 ]] || return 0
+  # Images share layers, so what they list adds up to more than is freed: measure the disk instead
+  root=$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)
+  before=$(df -Pk "${root:-/var/lib/docker}" 2>/dev/null | awk 'NR==2 {print $4}')
+  for img in "${images[@]}"; do
+    if docker rmi "$img" > /dev/null 2>&1; then
+      removed=$((removed + 1))
+    else
+      echo "  WARNING: couldn't remove $img."
+    fi
+  done
+  after=$(df -Pk "${root:-/var/lib/docker}" 2>/dev/null | awk 'NR==2 {print $4}')
+  if [[ "$before" =~ ^[0-9]+$ && "$after" =~ ^[0-9]+$ ]] && (( after >= before )); then
+    echo "  Removed $removed goharbor image(s) of earlier Harbor versions, freeing $(( (after - before) / 1024 )) MB."
+  else
+    echo "  Removed $removed goharbor image(s) of earlier Harbor versions."
+  fi
+  local old=$previous_version
+  [[ "$old" == "$HARBOR_VERSION" ]] && old=$recorded_version
+  local tgz="$base_dir/harbor-install-files/harbor-offline-installer-v$old.tgz"
+  if [[ -n "$old" && -f "$tgz" ]]; then
+    echo "  Kept $tgz ($(du -h "$tgz" | cut -f1)): a rollback needs it. Delete it once the upgrade is trusted."
+  fi
 }
 
 # Users this installer added to the docker group. Older installs recorded a flag and one user.
