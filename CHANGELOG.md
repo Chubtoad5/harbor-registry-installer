@@ -1,6 +1,6 @@
 # Changelog — harbor-registry-installer
 
-## v1.2.0 — unreleased — CA lifetime, upgrade dumps, old images, compose-safe passwords
+## v1.2.0 — 2026-11-11 — CA lifetime, upgrade dumps, old images, compose-safe passwords
 
 Spec 18 (chubtoad-automation), asked for by registry-tech-ops' Phase B.
 
