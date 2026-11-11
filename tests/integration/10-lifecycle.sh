@@ -176,7 +176,8 @@ id -nG cisudo | tr ' ' '\n' | grep -qx docker && bad "H2: uninstall kept the gro
 stage "$NEW"
 
 echo "=== H3: a certificate can't outlive its CA"
-inst DURATION_DAYS=30 && ok "install with 30 days" || { bad "install failed"; tail_o; }
+# Since v1.3.0 the CA has its own default (3650), so give it 30 days here: the renewal below must then stop at the CA's end
+inst DURATION_DAYS=30 CA_DURATION_DAYS=30 && ok "install with a 30-day CA and certificate" || { bad "install failed"; tail_o; }
 wait_api; env DURATION_DAYS=365 NEW_CERT_GEN=1 ./install_harbor.sh update-certificates >"$W/o" 2>&1 && ok "renewal asking for 365" || { bad "renewal failed"; tail_o; }
 [ "$(date -d "$(openssl x509 -noout -enddate -in "/opt/harbor/certs/$CN.crt" | cut -d= -f2)" +%s)" -le "$(date -d "$(openssl x509 -noout -enddate -in /opt/harbor/certs/ca.crt | cut -d= -f2)" +%s)" ] && ok "the certificate ends with the CA" || bad "the certificate outlives the CA"
 wipe; stage "$NEW"

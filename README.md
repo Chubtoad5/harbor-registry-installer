@@ -143,8 +143,8 @@ All variables have defaults and can be overridden by exporting them before runni
 | `LOCATION` | `BOSTON` | Certificate locality |
 | `ORGANIZATION` | `SELF` | Certificate organization |
 | `REGISTRY_COMMON_NAME` | `registry.edge.lab` | FQDN for the registry certificate (the historical `regsitry.edge.lab` typo default is fixed; existing installs are handled via the recorded install state, see below) |
-| `DURATION_DAYS` | `3650` | Server certificate validity in days. It's never issued for longer than the CA has left |
-| `CA_DURATION_DAYS` | `DURATION_DAYS`' value | Lifetime of a CA the installer makes: on a first install, or with `ROTATE_CA=true`. An existing CA keeps its own. A CA being made can't be shorter than `DURATION_DAYS`. For a one-year certificate under a ten-year CA: `DURATION_DAYS=365 CA_DURATION_DAYS=3650` |
+| `DURATION_DAYS` | `730` | Server certificate validity in days, at most 730: a larger value is lowered to 730 with a warning, because Apple devices reject a server certificate valid for more than 825 days (see [CA Reuse](#ca-reuse-on-re-install-and-certificate-renewal)). It's never issued for longer than the CA has left |
+| `CA_DURATION_DAYS` | `3650` | Lifetime of a CA the installer makes: on a first install, or with `ROTATE_CA=true`. An existing CA keeps its own. A CA being made can't be shorter than `DURATION_DAYS`. By default a 730-day certificate under a ten-year CA |
 
 ### Certificate Update Options
 
@@ -249,10 +249,21 @@ Only `ca.crt` is placed in `/etc/docker/certs.d/<FQDN>:<PORT>/`. The server priv
 there, and a `.cert` without its key makes every `docker login` fail with "missing key". Either one left
 by an older version is cleaned up on the next `install-harbor` or `update-certificates`.
 
-The CA's lifetime is `CA_DURATION_DAYS`, and the server certificate's is `DURATION_DAYS`. Unset,
-`CA_DURATION_DAYS` takes `DURATION_DAYS`' value, as both did before v1.2.0. A short server certificate under a
-long CA (say 365 days under 3650) means a yearly renewal keeps the CA, so clients keep trusting it. Changing
-`CA_DURATION_DAYS` later doesn't touch an existing CA: it applies the next time one is made.
+The CA's lifetime is `CA_DURATION_DAYS` (default 3650, ten years), and the server certificate's is `DURATION_DAYS`
+(default 730). A short server certificate under a long CA means a renewal keeps the CA, so clients keep trusting it.
+Changing `CA_DURATION_DAYS` later doesn't touch an existing CA: it applies the next time one is made.
+
+**Server certificates are capped at 730 days** (since v1.3.0). Apple devices reject a TLS server certificate valid for
+more than 825 days, even under a private CA, so Harbor's web UI fails in Safari and on iOS and macOS. Docker,
+containerd, Podman and Helm don't check, so pulls and pushes would still work. A larger `DURATION_DAYS` is lowered to
+730 with a warning. Before v1.3.0 the default was 3650 for both. A re-run keeps an existing certificate, however long.
+Keep `CERT_RENEW_BEFORE_DAYS` (default 30) well under 730: a certificate
+always inside its renewal window would be replaced, and Harbor redeployed, on every run. To replace a long one now,
+under the same CA so clients keep trusting it:
+
+```bash
+sudo NEW_CERT_GEN=1 ./install_harbor.sh update-certificates
+```
 
 An expired CA stops `install-harbor` and `update-certificates` (with `NEW_CERT_GEN=1`) before anything
 changes. `ROTATE_CA=true` replaces it, and every client must then trust the new one. A warning appears
@@ -488,13 +499,14 @@ Replace `<FQDN>` with your registry hostname (e.g., `registry.example.com`) and 
 
 ```bash
 FQDN="registry.example.com"
-DAYS=3650
+CA_DAYS=3650     # the CA: ten years
+DAYS=730         # the server certificate: at most 825, or Apple devices reject it
 CERT_DIR="./certs"
 mkdir -p $CERT_DIR
 
 # Generate CA
 openssl genrsa -out $CERT_DIR/ca.key 4096
-openssl req -x509 -new -nodes -sha512 -days $DAYS \
+openssl req -x509 -new -nodes -sha512 -days $CA_DAYS \
   -subj "/C=US/ST=MA/L=Boston/O=MyOrg/CN=$FQDN" \
   -key $CERT_DIR/ca.key -out $CERT_DIR/ca.crt
 

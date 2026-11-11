@@ -2,7 +2,7 @@
 
 # This script contains functions for installing a Harbor registry on Ubuntu for storing container images
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.3.0"
 
 # Record which variables the caller explicitly set BEFORE defaults are applied, so
 # recorded install-time values from .install-env can fill in unset variables without
@@ -54,9 +54,11 @@ STATE=${STATE:-"MA"}
 LOCATION=${LOCATION:-"BOSTON"}
 ORGANIZATION=${ORGANIZATION:-"SELF"}
 REGISTRY_COMMON_NAME=${REGISTRY_COMMON_NAME:-"registry.edge.lab"}
-DURATION_DAYS=${DURATION_DAYS:-"3650"}
-# Lifetime of a CA this installer makes: a first install, or ROTATE_CA. Unset, it's DURATION_DAYS. An existing CA keeps its own.
-CA_DURATION_DAYS=${CA_DURATION_DAYS:-$DURATION_DAYS}
+# Server certificate lifetime in days. Over CERT_MAX_DAYS it's lowered, with a warning: Apple devices reject a TLS server
+# certificate valid for more than 825 days, even under a private CA, which breaks Harbor's web UI in Safari.
+DURATION_DAYS=${DURATION_DAYS:-"730"}
+# Lifetime of a CA this installer makes: a first install, or ROTATE_CA. An existing CA keeps its own.
+CA_DURATION_DAYS=${CA_DURATION_DAYS:-"3650"}
 # Replace the CA. Every client must then trust the new one, so this never happens by itself.
 ROTATE_CA=${ROTATE_CA:-false}
 CA_EXPIRY_WARN_DAYS=${CA_EXPIRY_WARN_DAYS:-30}
@@ -85,6 +87,8 @@ certs_dir="/opt/harbor/certs"
 install_env_file="/opt/harbor/.install-env"
 docker_certs_root="/etc/docker/certs.d"
 data_dir="/data"
+# The longest server certificate the installer issues (H19)
+CERT_MAX_DAYS=730
 db_dump_dir="$data_dir/backup/harbor-installer"
 # The Harbor version running before this run, when data already existed, and the one the last successful run recorded:
 # set by install_harbor. A failed upgrade can leave the containers at the new version while the record keeps the old.
@@ -1193,11 +1197,17 @@ function check_durations () {
       return 1
     fi
   done
+  # H19: a longer server certificate is lowered rather than refused, so callers that send more keep working
+  if (( 10#$DURATION_DAYS > CERT_MAX_DAYS )); then
+    echo "  WARNING: DURATION_DAYS=$DURATION_DAYS is over $CERT_MAX_DAYS. Issuing server certificates for $CERT_MAX_DAYS days:"
+    echo "  Apple devices reject a server certificate valid for more than 825 days, which breaks Harbor's web UI in Safari."
+    DURATION_DAYS=$CERT_MAX_DAYS
+  fi
   # Only a CA made now takes CA_DURATION_DAYS. An existing one keeps its lifetime, and a certificate is capped at what it has left.
   ca_will_be_made || return 0
   if (( 10#$CA_DURATION_DAYS < 10#$DURATION_DAYS )); then
     echo "Error: CA_DURATION_DAYS ($CA_DURATION_DAYS) is shorter than DURATION_DAYS ($DURATION_DAYS), and a certificate"
-    echo "  can't outlive its CA. Nothing has been changed. Unset, CA_DURATION_DAYS takes DURATION_DAYS' value."
+    echo "  can't outlive its CA. Nothing has been changed. Unset, CA_DURATION_DAYS is 3650."
     return 1
   fi
 }
