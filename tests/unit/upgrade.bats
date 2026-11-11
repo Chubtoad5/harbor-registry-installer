@@ -119,7 +119,8 @@ esac'
   rm -f /opt/harbor/docker-compose.yml
   [ "$status" -eq 1 ]
   called 'compose -f /opt/harbor/docker-compose.yml up -d postgresql'
-  called 'compose -f /opt/harbor/docker-compose.yml stop'
+  called 'compose -f /opt/harbor/docker-compose.yml stop postgresql'
+  called 'compose -f /opt/harbor/docker-compose.yml stop log'
 }
 @test "H18: a retried upgrade, with the containers already at the new version, still removes the old images" {
   printf '%s\n' goharbor/harbor-core:v2.15.0 goharbor/harbor-core:v2.14.1 > "$IMAGES"

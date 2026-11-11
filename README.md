@@ -344,8 +344,10 @@ sudo systemctl start harbor-docker
   exists`. Users, projects, robot accounts and image records come back as they were before the upgrade.
 - **Images** pushed after the upgrade keep their files in `/data/registry`, but the restored database doesn't list
   them: push them again.
-- **Afterwards,** a re-run with the old version says "No change". Delete `/data/database.failed-*` once the restore
-  is trusted: `uninstall-harbor` doesn't remove it.
+- **Passwords copied from `harbor.yml`:** it writes `"` as `\"` and `\` as `\\` inside the quotes. Undo those when
+  passing them in step 2.
+- **Afterwards,** a re-run with the old version says "No change". Delete `/root/harbor.yml.before-restore`, which holds
+  both passwords, and `/data/database.failed-*` once the restore is trusted: `uninstall-harbor` removes neither.
 - **These steps are for the installer's own dumps,** made with `pg_dumpall --clean --if-exists`, so they load over
   the fresh database step 2 makes.
 

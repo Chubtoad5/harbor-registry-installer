@@ -1403,6 +1403,7 @@ function dump_database_before_upgrade () {
       return 1
     fi
     echo "  harbor-db isn't running: starting the installed version's database alone, for the dump..."
+    [[ "$(docker inspect -f '{{.State.Running}}' harbor-log 2>/dev/null)" == "true" ]] && log_was_running=1
     docker compose -f /opt/harbor/docker-compose.yml up -d postgresql > /dev/null 2>&1 || true
     started_db=1
   fi
@@ -1434,11 +1435,14 @@ function dump_database_before_upgrade () {
   echo "  To roll back a failed upgrade, see the README: Restoring the database after a failed upgrade."
 }
 
-# stop_started_db: put a stopped Harbor back as it was, when the dump started its database and then failed
+# stop_started_db: when the dump started the database and then failed, stop what it started (the database, and the
+# log service it depends on if that wasn't running), and leave the rest of Harbor as it was
 started_db=0
+log_was_running=0
 function stop_started_db () {
   [[ $started_db -eq 1 ]] || return 0
-  docker compose -f /opt/harbor/docker-compose.yml stop > /dev/null 2>&1 || true
+  docker compose -f /opt/harbor/docker-compose.yml stop postgresql > /dev/null 2>&1 || true
+  [[ $log_was_running -eq 1 ]] || docker compose -f /opt/harbor/docker-compose.yml stop log > /dev/null 2>&1 || true
   started_db=0
 }
 
