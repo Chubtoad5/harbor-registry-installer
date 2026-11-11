@@ -257,7 +257,9 @@ Changing `CA_DURATION_DAYS` later doesn't touch an existing CA: it applies the n
 more than 825 days, even under a private CA, so Harbor's web UI fails in Safari and on iOS and macOS. Docker,
 containerd, Podman and Helm don't check, so pulls and pushes would still work. A larger `DURATION_DAYS` is lowered to
 730 with a warning. Before v1.3.0 the default was 3650 for both. A re-run keeps an existing certificate, however long.
-To replace a long one now, under the same CA so clients keep trusting it:
+Keep `CERT_RENEW_BEFORE_DAYS` (default 30) well under 730: a certificate
+always inside its renewal window would be replaced, and Harbor redeployed, on every run. To replace a long one now,
+under the same CA so clients keep trusting it:
 
 ```bash
 sudo NEW_CERT_GEN=1 ./install_harbor.sh update-certificates
