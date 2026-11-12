@@ -118,8 +118,8 @@ All variables have defaults and can be overridden by exporting them before runni
 | `HARBOR_PORT` | `443` | HTTPS port for the registry |
 | `HARBOR_USERNAME` | `admin` | System administrator account. Harbor can't rename `admin`, so another name creates a second administrator with the same password, and `admin` stays. It needs 8 to 128 characters with a lowercase letter, an uppercase letter and a number. |
 | `HARBOR_USER_EMAIL` | `<HARBOR_USERNAME>@<REGISTRY_COMMON_NAME>` | Email for that account |
-| `HARBOR_PASSWORD` | `Harbor12345` | Admin password (change after first login). **Only applied on the very first install** — see [Changing the Admin Password](#changing-the-admin-password). Some characters are refused: see [Passwords](#passwords) |
-| `HARBOR_DB_PASSWORD` | `root123` | Harbor's internal PostgreSQL password. Known limitation: the default is the Harbor-upstream `root123`; override it for production use. Written into `harbor.yml` (root-only, mode 600). See [Passwords](#passwords) |
+| `HARBOR_PASSWORD` | `Harbor12345` | Admin password (change after first login). **Only applied on the very first install** — see [Changing the Admin Password](#changing-the-admin-password). Any 8 to 128 printable characters: see [Passwords](#passwords) |
+| `HARBOR_DB_PASSWORD` | generated | Harbor's internal PostgreSQL password. A first install that isn't given one gets 32 random letters and digits (before v1.4.0, Harbor's published `root123`). An existing install keeps its own. Written into `harbor.yml` (root-only, mode 600). See [Passwords](#passwords) |
 | `DOCKER_BRIDGE_CIDR` | `172.30.0.1/16` | Docker bridge CIDR (`bip`). Merged into an existing `/etc/docker/daemon.json` (via `jq`/`python3`) — never clobbers other settings; skipped if `bip` is already defined |
 | `PROJECTS` | _(empty)_ | Space-separated list of Harbor projects to create |
 | `HARBOR_API_WAIT_SEC` | `60` | How long to wait for the Harbor API after (re)starting it |
@@ -286,20 +286,33 @@ created with.
 
 ### Passwords
 
-`harbor.yml` gets each password exactly, whatever it contains. But Harbor's `prepare` also writes them into env
-files under `/opt/harbor/common/config/`, which docker compose reads with its own rules. Compose expands `$name`,
-cuts a value at a `#` after a space, trims spaces at either end, and reads a leading quote as quoting. So an admin
-password with any of these would give `admin` a different password, and the install would fail with a 401.
+Any admin password of 8 to 128 printable characters works as typed: letters, digits, the space and all 32 symbols
+(spec 21). Control characters, such as a tab, and anything longer are refused before anything changes.
 
-`HARBOR_PASSWORD` is refused before anything changes when it has:
-- a `$` before a letter, `_`, `{` or another `$` (`$1`, `$-` and a trailing `$` are fine);
-- a `#` after a space (`a#b` is fine);
-- a space at the start or the end;
-- a `"` or `'` at the start.
+`harbor.yml` gets each password exactly. But Harbor's `prepare` also writes them into env files under
+`/opt/harbor/common/config/`, and docker compose reads those with its own rules: it expands `$name`, cuts a value at a
+`#` after a space, trims spaces at either end, and reads a leading quote as quoting. So the installer handles an admin
+password compose would change another way:
 
-Control characters were refused already. `HARBOR_DB_PASSWORD` with any of these only gets a warning: every
-container that uses it reads the same file, so Harbor works, but Postgres gets a shorter password than the one
-passed.
+- `harbor.yml` holds it encoded, as `harbor_admin_password: "b64:<base64>"`, which compose leaves alone;
+- Harbor starts with that encoded form as admin's first password;
+- the installer then sets the real password through Harbor's API, and checks that admin logs in with it.
+
+Harbor's API has its own rule: 8 to 128 characters, with a lowercase letter, an uppercase letter and a digit. So an
+admin password that goes this way must have those, and a first install checks it before anything changes. Most
+passwords, including `Harbor12345` and `changeme`, go the old way and need no rule. The ones that go through the API
+have a `$` before a letter, `_`, `{` or `$`; a `#` after a space; a space at the start or the end; a quote at the start;
+or start with `b64:`.
+
+`HARBOR_DB_PASSWORD` can't go through an API, so `harbor.yml` holds one compose would change in compose's own quoted
+form (`"..."`, with `\`, `"` and `$` escaped), which compose reads back exactly. Harbor itself can't take a `'` or a
+space in its database password: a `'` leaves Postgres with no password, and a space breaks the connection string.
+Those two are refused. A first install that isn't given a database password gets a generated one.
+
+To read a password back from `harbor.yml`, for the restore steps below:
+- `harbor_admin_password: "b64:..."`: `sed -n 's/^harbor_admin_password: "b64:\(.*\)"$/\1/p' /opt/harbor/harbor.yml | base64 -d`;
+- a database password in double quotes inside the YAML string (`password: "\"...\""`): drop the outer quotes and
+  the backslashes before `\`, `"` and `$`.
 
 An install made with such an admin password before v1.2.0 has the password compose produced. Log in with that,
 then change it in the UI. For example, `Abc$xyz9Q #1` became `Abc`.
@@ -333,7 +346,8 @@ sudo mv /data/database /data/database.failed-$(date -u +%Y%m%d%H%M%S)
 
 # 2. Reinstall the old version on an empty database, with the settings it had. Both passwords must be the ones in
 #    /opt/harbor/harbor.yml (harbor_admin_password, and database: password:), so harbor.yml keeps them: the dump
-#    restores the database's own, and a later re-run reads harbor.yml's
+#    restores the database's own, and a later re-run reads harbor.yml's. An encoded one is read back as the
+#    Passwords section says
 sudo HARBOR_VERSION=<old version> HARBOR_PASSWORD='<as before>' HARBOR_DB_PASSWORD='<as before>' \
   REGISTRY_COMMON_NAME=<as before> ./install_harbor.sh install-harbor
 

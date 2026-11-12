@@ -10,11 +10,12 @@ setup() {
 yaml_value() { python3 -I -c 'import sys,yaml; d=yaml.safe_load(open(sys.argv[1])); print(d["harbor_admin_password"] if sys.argv[2]=="admin" else d["database"]["password"], end="")' "$1" "$2"; }
 PASSWORDS=('Abc$123def' 'Abc"123def' 'Abc\123def' 'Abc #123def' 'Abc: 123def' "Abc'123def" 'Abc`123def' 'a\"b\\c"' 'plainPass1' '*star' '!bang' '%pct' '@at' '{x}' '[y]')
 @test "H7: every password survives harbor.yml exactly, as YAML sees it" {
+  # What YAML gives Harbor's prepare is the password, or for one compose would change, its encoded form (spec 21)
   for pw in "${PASSWORDS[@]}"; do
     HARBOR_PASSWORD=$pw; HARBOR_DB_PASSWORD=$pw
     gen_harbor_yml "$YML"
-    [ "$(yaml_value "$YML" admin)" = "$pw" ]
-    [ "$(yaml_value "$YML" db)" = "$pw" ]
+    [ "$(yaml_value "$YML" admin)" = "$(yml_admin_value)" ]
+    [ "$(yaml_value "$YML" db)" = "$(yml_db_value)" ]
   done
 }
 @test "H7: every password reads back exactly" {
@@ -105,33 +106,11 @@ teardown() { rm -f /opt/harbor/harbor.yml; }
   user_set_harbor_db_password=x
   check_existing_db_password
 }
-# H16: measured with docker compose v5.6.1 reading an env file, as Harbor's containers read theirs
+# H16's compose rule, measured with docker compose v5.6.1 reading an env file as Harbor's containers read theirs. Since
+# spec 21 it no longer refuses anything: it decides which admin passwords go through Harbor's API (H21), and which
+# database passwords harbor.yml holds in compose's quoted form (H22).
 COMPOSE_CHANGES=('Abc$xyz9Q' 'Abc${x}9Q' 'Abc$$9Q' 'Abc$_x9Q' 'Abc #123def' 'Abc  #x' ' Abc123def' 'Abc123def ' '"Abc"123def' "'Abc'123def" '"Abc123def' 'P$a"s \w`x #y: z9')
 COMPOSE_KEEPS=('Abc$123def' 'Abc$' 'Abc$-9Q' 'Abc$ x' 'Abc$.x' 'Abc#123def' '#Abc123def' 'Abc"123def' "Abc'123def" 'Abc\123def' 'Abc: 123def' 'Abc 123def' 'Harbor12345')
-@test "H16: an admin password docker compose would change is refused, and says why" {
-  for pw in "${COMPOSE_CHANGES[@]}"; do
-    HARBOR_PASSWORD=$pw; HARBOR_DB_PASSWORD=root123
-    run check_passwords
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"Nothing has been changed"* ]]
-    # The message never prints the password itself
-    [[ "$output" != *"$pw"* ]]
-  done
-}
-@test "H16: one compose reads back unchanged is accepted" {
-  for pw in "${COMPOSE_KEEPS[@]}"; do
-    HARBOR_PASSWORD=$pw; HARBOR_DB_PASSWORD=root123
-    run check_passwords
-    [ "$status" -eq 0 ]
-    [ -z "$output" ]
-  done
-}
-@test "H16: a database password compose would change warns, and isn't refused" {
-  HARBOR_PASSWORD=Harbor12345; HARBOR_DB_PASSWORD='Db$xyz9Q #1x'
-  run check_passwords
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"WARNING: HARBOR_DB_PASSWORD"* ]]
-}
 @test "H16: the rule matches each case compose was measured on" {
   for pw in "${COMPOSE_CHANGES[@]}"; do compose_changes "$pw" >/dev/null; done
   for pw in "${COMPOSE_KEEPS[@]}"; do ! compose_changes "$pw" >/dev/null || false; done

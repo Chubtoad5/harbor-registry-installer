@@ -241,11 +241,42 @@ else
   echo "SKIP  H7, the password cases: they run on Ubuntu 24.04 only (spec 09, S5)"
 fi
 
-echo "=== H16: admin passwords docker compose would change are refused"
-for pw in 'Abc$xyz9Q' 'Abc #123def' ' Abc123def' '"Abc123def'; do
-  inst "HARBOR_PASSWORD=$pw" && bad "accepted [$pw]" || { grep -q 'Nothing has been changed' "$W/o" && ok "refused [$pw]" || { bad "[$pw] failed without the refusal"; tail_o; }; }
-done
-[ -e /opt/harbor/.install-env ] && bad "H16: a refusal changed something" || ok "H16: the refusals changed nothing"
+echo "=== H21, H22 (spec 21): an admin password Harbor's setup files can't carry, and a database password compose would change"
+# shellcheck source=../vectors.bash
+source "$REPO/tests/vectors.bash"
+load_vectors "$REPO/tests/password-vectors.txt"
+# The full set of symbols, plus what compose would change: a leading space, a # after a space and $ before a letter
+APW=" ${VEC[full]} #x\$HOME"
+# Every character compose changes that Harbor takes in its database password (spec 21's bench)
+DBPW='Db1"$HOME#x\y'
+cfg_for() { printf 'user = "admin:%s"\n' "$(sed 's/[\\"]/\\&/g' <<< "$1")"; }
+code_as() { curl -sk -m 10 -o /dev/null -w '%{http_code}' -K <(cfg_for "$1") "https://$CN:443/api/v2.0/$2"; }
+if inst "HARBOR_PASSWORD=$APW" "HARBOR_DB_PASSWORD=$DBPW" PROJECTS=p21; then ok "H21: install with the full set of symbols, a leading space, ' #' and \$HOME"; else bad "H21: install"; tail_o; fi
+grep -q "Set admin's password through Harbor's API" "$W/o" && ok "H21: it set the password through Harbor's API" || bad "H21: it didn't say it used the API"
+wait_api
+[ "$(code_as "$APW" users/current)" = 200 ] && ok "H21: the API takes the password" || bad "H21: the API refuses the password"
+[ "$(code_as "${APW# }" users/current)" = 401 ] && ok "H21: the API refuses it without its leading space" || bad "H21: the API takes it without its leading space"
+c=$(curl -sk -m 10 -o /dev/null -w '%{http_code}' --data-urlencode principal=admin --data-urlencode "password=$APW" "https://$CN:443/c/login")
+[ "$c" = 200 ] && ok "H21: the web UI's login takes it" || bad "H21: the web UI's login got $c"
+printf '%s' "$APW" | docker login "$CN:443" -u admin --password-stdin >/dev/null 2>&1 && ok "H21: docker login takes it" || bad "H21: docker login refuses it"
+docker logout "$CN:443" >/dev/null 2>&1
+curl -sk -m 10 -K <(cfg_for "$APW") "https://$CN:443/api/v2.0/projects?name=p21" | jq -e 'map(.name) | index("p21")' >/dev/null \
+  && ok "H21: the project was made with it" || bad "H21: no project p21"
+grep -q '^harbor_admin_password: "b64:' /opt/harbor/harbor.yml && ok "H21: harbor.yml holds it encoded" || bad "H21: harbor.yml: $(grep -c '^harbor_admin_password: "b64:' /opt/harbor/harbor.yml)"
+[ "$(curl -sk -m 10 -K <(cfg_for "$APW") "https://$CN:443/api/v2.0/health" | jq -r .status)" = healthy ] && ok "H22: Harbor is healthy on that database password" || bad "H22: Harbor isn't healthy"
+before=$(started)
+if inst PROJECTS=p21 && grep -q 'No change' "$W/o"; then ok "H21: a re-run passing no password says No change"; else bad "H21: the re-run failed or redeployed"; tail_o; fi
+[ "$(started)" = "$before" ] && ok "H21: nothing was restarted" || bad "H21: core or nginx restarted"
+if inst HARBOR_FORCE_REDEPLOY=true PROJECTS=p21; then ok "H21: a forced redeploy"; else bad "H21: the forced redeploy failed"; tail_o; fi
+wait_api; [ "$(code_as "$APW" users/current)" = 200 ] && ok "H21: the password survives a redeploy" || bad "H21: the redeploy changed the password"
+env NEW_CERT_GEN=1 ./install_harbor.sh update-certificates >"$W/o" 2>&1 && ok "H21: update-certificates reads it back" || { bad "H21: update-certificates"; tail_o; }
+wipe; stage "$NEW"
+inst 'HARBOR_PASSWORD=abc$HOME1' && bad "H21: a password Harbor's API can't take was accepted" || { grep -q 'Nothing has been changed' "$W/o" && ok "H21: one Harbor's API can't take is refused up front" || { bad "H21: it failed without the refusal"; tail_o; }; }
+inst "HARBOR_DB_PASSWORD=Db1'x" && bad "H22: a database password Harbor can't take was accepted" || { grep -q "Harbor itself can't take" "$W/o" && ok "H22: one Harbor can't take is refused up front" || { bad "H22: it failed without the refusal"; tail_o; }; }
+[ -e /opt/harbor/.install-env ] && bad "spec 21: a refusal changed something" || ok "spec 21: the refusals changed nothing"
+if inst; then ok "H22: a first install with no database password"; else bad "H22: a first install with no database password"; tail_o; fi
+sed -n '/^database:/,/^[^ #]/{s/^  password: //p}' /opt/harbor/harbor.yml | grep -qxE '"[A-Za-z0-9]{32}"' && ok "H22: it got a generated database password, not root123" || bad "H22: the database password in harbor.yml isn't a generated one"
+wipe; stage "$NEW"
 
 echo "=== H11: HARBOR_USERNAME"
 inst HARBOR_USERNAME=ops HARBOR_PASSWORD=changeme && bad "a weak password was accepted" || ok "a weak password is refused"

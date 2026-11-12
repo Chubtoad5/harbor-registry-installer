@@ -1,0 +1,3 @@
+# Spec 21's A5 for Harbor: the last release installed with a plain password and an image pushed, then the commit under
+# test installed over it with the same settings. Run by automation-ci's ci/scenario.sh.
+role host 4 4096 tests/scenarios/a5-upgrade.sh

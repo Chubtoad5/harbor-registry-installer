@@ -1,5 +1,45 @@
 # Changelog — harbor-registry-installer
 
+## v1.4.0 — 2026-11-12 — Any admin password works; a generated database password
+
+Spec 21 (chubtoad-automation).
+
+### Fixed
+- **Any admin password of 8 to 128 printable characters works** (H21). v1.2.0 refused one with a `$` before a letter,
+  `_`, `{` or `$`, a `#` after a space, a space at either end, or a leading quote, because Harbor's own `prepare` writes
+  the password into an env file that docker compose reads with its own rules, so admin would have got a different
+  password. Now such a password goes into `harbor.yml` encoded (`b64:<base64>`), Harbor starts with the encoded form,
+  and the installer sets the real one through Harbor's API (`PUT /api/v2.0/users/<id>/password`), then checks admin
+  logs in with it. A run interrupted in between finishes the job when it's run again. ap-tools' `SWFS_HARBOR_PASS` gets
+  the same freedom.
+
+### Changed
+- **An admin password that goes through the API must meet Harbor's API rule:** 8 to 128 characters, with a lowercase
+  letter, an uppercase letter and a digit (measured on Harbor 2.15). A first install checks it before anything changes,
+  with a message that never shows the password. Passwords compose reads back unchanged, such as `Harbor12345` and
+  `changeme`, take the same path as before and need no rule, so no existing install changes.
+- **A first install that isn't given `HARBOR_DB_PASSWORD` gets a generated one** (H22): 32 letters and digits, kept in
+  `harbor.yml`, instead of Harbor's published `root123`. An existing install keeps its own password, and its line in
+  `harbor.yml` is written back byte for byte.
+- **A `HARBOR_DB_PASSWORD` compose would change is written in compose's quoted form,** so Postgres gets it exactly. The
+  "Harbor works, but Postgres gets a shorter password" warning is gone. **A `'` or a space in it is refused**, because
+  Harbor itself can't take them: a `'` left Postgres with no password, and a space broke Harbor's connection string.
+- Passwords over 128 characters are refused.
+
+### Tests
+- `tests/unit/any-password.bats`: every spec 21 test password through `harbor.yml` and its read-back, what Harbor's env
+  files get, the API rule and its message, a fake Harbor API that records the password change, a retry, existing
+  data, the database password's forms and refusals, the generated password, and an old install's line kept as it was.
+- `tests/unit/passwords.bats`: H16's refusal tests replaced; the measured compose rule stays.
+- `tests/integration/10-lifecycle.sh`: a first install with the full set of symbols plus a leading space, ` #` and
+  `$HOME` for admin, and a database password compose would change. The API, the web UI's login and `docker login`
+  take it, a re-run says No change and restarts nothing, a forced redeploy and `update-certificates` keep it, and the
+  refusals change nothing. A first install with no database password gets a generated one.
+- `tests/scenarios/a5.roles`, `a5-upgrade.sh`: the last release with a plain password and an image, then this one over
+  it: nothing redeployed or restarted, `harbor.yml` byte for byte the same, the password and the image still work.
+- `tests/password-vectors.txt`, `tests/vectors.bash`, `tests/secret-lint.py`, `tests/unit/secret-lint.bats`: spec 21's
+  shared test passwords and static check.
+
 ## v1.3.0 — 2026-11-11 — Server certificates capped at 730 days; the CA keeps ten years
 
 Spec 19 (chubtoad-automation).
