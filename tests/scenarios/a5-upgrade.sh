@@ -31,11 +31,17 @@ within 180 healthy && ok "$old is healthy" || bad "$old isn't healthy"
 img=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -m1 '^goharbor/registry-photon:')
 if printf '%s' "$PW" | docker login "$CN:443" -u admin --password-stdin >/dev/null 2>&1 && docker tag "$img" "$CN:443/a5/ci-a5:1" \
    && docker push -q "$CN:443/a5/ci-a5:1" >/dev/null 2>&1; then ok "push an image to $old"; else bad "push an image to $old"; fi
+# A fresh Harbor restarts a container or two on its own for a minute or so, and a re-run that finds one down takes the
+# full path, by design (it repairs the stack). So wait until every container has run, healthy, for three checks in a row.
+all_up() { [ -z "$(docker compose -f /opt/harbor/docker-compose.yml ps -a --format '{{.Name}} {{.State}}' | grep -v ' running$')" ] && healthy; }
+settled() { local n=0 i; for i in $(seq 1 30); do if all_up; then n=$((n + 1)); [ "$n" -ge 3 ] && return 0; else n=0; fi; sleep 10; done; return 1; }
+settled && ok "$old has settled: every container running, healthy, three checks in a row" \
+  || bad "$old didn't settle: $(docker compose -f /opt/harbor/docker-compose.yml ps -a --format '{{.Name}} {{.State}}' | grep -v ' running$' | tr '\n' ' ')"
 before=$(state); started_before=$(started); yml=$(sha256sum < /opt/harbor/harbor.yml)
 
 if (cd new && env REGISTRY_COMMON_NAME=$CN PROJECTS=a5 ./install_harbor.sh install-harbor) > o2 2>&1; then ok "install the commit under test over $old"
 else bad "install the commit under test over $old"; tail -10 o2 | cut -c1-170; fi
-grep -q 'No change' o2 && ok "it says No change" || bad "it redeployed"
+grep -q 'No change' o2 && ok "it says No change" || bad "it redeployed ($(grep -m1 -iE 'not running|down|Existing Harbor data' o2 | cut -c1-120))"
 [ "$(state)" = "$before" ] && ok "no container was recreated" || bad "containers were recreated: $(diff <(echo "$before") <(state) | grep '^[<>]' | tr '\n' ' ')"
 [ "$(started)" = "$started_before" ] && ok "core and nginx weren't restarted" || bad "core or nginx restarted: was '$(tr '\n' ' ' <<< "$started_before")', now '$(started | tr '\n' ' ')'"
 [ "$(sha256sum < /opt/harbor/harbor.yml)" = "$yml" ] && ok "harbor.yml is unchanged, byte for byte" || bad "harbor.yml changed"
