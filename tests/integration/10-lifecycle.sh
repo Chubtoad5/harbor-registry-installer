@@ -256,14 +256,24 @@ grep -q "Set admin's password through Harbor's API" "$W/o" && ok "H21: it set th
 wait_api
 [ "$(code_as "$APW" users/current)" = 200 ] && ok "H21: the API takes the password" || bad "H21: the API refuses the password"
 [ "$(code_as "${APW# }" users/current)" = 401 ] && ok "H21: the API refuses it without its leading space" || bad "H21: the API takes it without its leading space"
-c=$(curl -sk -m 10 -o /dev/null -w '%{http_code}' --data-urlencode principal=admin --data-urlencode "password=$APW" "https://$CN:443/c/login")
-[ "$c" = 200 ] && ok "H21: the web UI's login takes it" || bad "H21: the web UI's login got $c"
+# ui_login <password>: the web UI's own login, with the CSRF token Harbor hands out on a GET under /c/
+ui_login() {
+  local cj tok c; cj=$(mktemp)
+  tok=$(curl -sk -m 10 -c "$cj" -D - -o /dev/null "https://$CN:443/c/login" | tr -d '\r' | sed -n 's/^[Xx]-[Hh]arbor-[Cc]srf-[Tt]oken: *//p')
+  c=$(curl -sk -m 10 -o /dev/null -w '%{http_code}' -b "$cj" -c "$cj" -H "X-Harbor-CSRF-Token: $tok" \
+        --data-urlencode principal=admin --data-urlencode "password=$1" "https://$CN:443/c/login")
+  rm -f "$cj"; echo "$c"
+}
+c=$(ui_login "$APW"); [ "$c" = 200 ] && ok "H21: the web UI's login takes it" || bad "H21: the web UI's login got $c"
+c=$(ui_login "${APW# }"); [ "$c" = 401 ] && ok "H21: the web UI's login refuses it without its leading space" || bad "H21: the web UI's login, without the leading space, got $c"
 printf '%s' "$APW" | docker login "$CN:443" -u admin --password-stdin >/dev/null 2>&1 && ok "H21: docker login takes it" || bad "H21: docker login refuses it"
 docker logout "$CN:443" >/dev/null 2>&1
 curl -sk -m 10 -K <(cfg_for "$APW") "https://$CN:443/api/v2.0/projects?name=p21" | jq -e 'map(.name) | index("p21")' >/dev/null \
   && ok "H21: the project was made with it" || bad "H21: no project p21"
 grep -q '^harbor_admin_password: "b64:' /opt/harbor/harbor.yml && ok "H21: harbor.yml holds it encoded" || bad "H21: harbor.yml: $(grep -c '^harbor_admin_password: "b64:' /opt/harbor/harbor.yml)"
-[ "$(curl -sk -m 10 -K <(cfg_for "$APW") "https://$CN:443/api/v2.0/health" | jq -r .status)" = healthy ] && ok "H22: Harbor is healthy on that database password" || bad "H22: Harbor isn't healthy"
+healthy() { [ "$(curl -sk -m 10 -K <(cfg_for "$APW") "https://$CN:443/api/v2.0/health" | jq -r .status)" = healthy ]; }
+for _ in $(seq 1 36); do healthy && break; sleep 5; done
+healthy && ok "H22: Harbor is healthy on that database password" || bad "H22: Harbor isn't healthy: $(curl -sk -m 10 "https://$CN:443/api/v2.0/health" | jq -c '[.components[] | select(.status != "healthy") | .name]')"
 before=$(started)
 if inst PROJECTS=p21 && grep -q 'No change' "$W/o"; then ok "H21: a re-run passing no password says No change"; else bad "H21: the re-run failed or redeployed"; tail_o; fi
 [ "$(started)" = "$before" ] && ok "H21: nothing was restarted" || bad "H21: core or nginx restarted"
@@ -271,7 +281,7 @@ if inst HARBOR_FORCE_REDEPLOY=true PROJECTS=p21; then ok "H21: a forced redeploy
 wait_api; [ "$(code_as "$APW" users/current)" = 200 ] && ok "H21: the password survives a redeploy" || bad "H21: the redeploy changed the password"
 env NEW_CERT_GEN=1 ./install_harbor.sh update-certificates >"$W/o" 2>&1 && ok "H21: update-certificates reads it back" || { bad "H21: update-certificates"; tail_o; }
 wipe; stage "$NEW"
-inst 'HARBOR_PASSWORD=abc$HOME1' && bad "H21: a password Harbor's API can't take was accepted" || { grep -q 'Nothing has been changed' "$W/o" && ok "H21: one Harbor's API can't take is refused up front" || { bad "H21: it failed without the refusal"; tail_o; }; }
+inst 'HARBOR_PASSWORD=abc$xyz12' && bad "H21: a password Harbor's API can't take was accepted" || { grep -q 'Nothing has been changed' "$W/o" && ok "H21: one Harbor's API can't take is refused up front" || { bad "H21: it failed without the refusal"; tail_o; }; }
 inst "HARBOR_DB_PASSWORD=Db1'x" && bad "H22: a database password Harbor can't take was accepted" || { grep -q "Harbor itself can't take" "$W/o" && ok "H22: one Harbor can't take is refused up front" || { bad "H22: it failed without the refusal"; tail_o; }; }
 [ -e /opt/harbor/.install-env ] && bad "spec 21: a refusal changed something" || ok "spec 21: the refusals changed nothing"
 if inst; then ok "H22: a first install with no database password"; else bad "H22: a first install with no database password"; tail_o; fi
