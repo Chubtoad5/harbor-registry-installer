@@ -2,7 +2,7 @@
 
 # This script contains functions for installing a Harbor registry on Ubuntu for storing container images
 
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.4.0"
 
 # Record which variables the caller explicitly set BEFORE defaults are applied, so
 # recorded install-time values from .install-env can fill in unset variables without
@@ -87,6 +87,8 @@ certs_dir="/opt/harbor/certs"
 install_env_file="/opt/harbor/.install-env"
 docker_certs_root="/etc/docker/certs.d"
 data_dir="/data"
+# An existing install's database password line in harbor.yml, written back as it is (H22)
+HARBOR_DB_YML_LINE=""
 # The longest server certificate the installer issues (H19)
 CERT_MAX_DAYS=730
 db_dump_dir="$data_dir/backup/harbor-installer"
@@ -120,12 +122,18 @@ function install_harbor {
     check_existing_db_password || exit 1
     preserve_existing_yml_passwords
     check_downgrade || exit 1
+  elif [[ -z "$user_set_harbor_db_password" ]]; then
+    # H22: a first install that wasn't given a database password gets its own, not Harbor's published root123.
+    # harbor.yml keeps it, so re-runs and the README's restore steps read it from there.
+    HARBOR_DB_PASSWORD=$(generate_db_password)
   fi
   check_existing_ca || exit 1
   if harbor_unchanged; then
     echo "  No change: Harbor is running as requested. Skipping Docker, certificates and redeploy."
     echo "  (HARBOR_FORCE_REDEPLOY=true runs the full install anyway.)"
     run_step create_harbor_service
+    # Called directly: at DEBUG=0 run_step would hide why the run stopped
+    apply_admin_password || exit 1
     run_step create_harbor_projects
   else
     # Fetch first, so a bad version fails before anything has changed
@@ -139,6 +147,7 @@ function install_harbor {
     run_step gen_harbor_yml
     run_step run_harbor_installer
     run_step create_harbor_service
+    apply_admin_password || exit 1
     run_step create_harbor_projects
     run_step commit_install_version
     remove_old_images
@@ -1080,10 +1089,42 @@ function yml_password () {
   if [[ "$line" == \"*\" ]]; then
     line=${line#\"}
     line=${line%\"}
-    dq_unescape "$line"
+    line=$(dq_unescape "$line"; printf x)
+    line=${line%x}
+  fi
+  # H21: the admin password harbor.yml holds as b64:<base64> is the real one, encoded (yml_admin_value)
+  if [[ "$which" == admin && "$line" == b64:* ]] && printf '%s' "${line#b64:}" | base64 -d >/dev/null 2>&1; then
+    printf '%s' "${line#b64:}" | base64 -d
+  # H22: a database password in compose's quoted form (yml_db_value), which is also what compose gave Postgres
+  elif [[ "$which" == db && ${#line} -ge 2 && "$line" == \"*\" ]]; then
+    compose_dq_decode "$line"
   else
     printf '%s' "$line"
   fi
+}
+
+# admin_via_api <password>: true when Harbor's env files can't carry this admin password as typed (H21). Harbor's own
+# prepare writes harbor_admin_password unquoted into an env file, and docker compose changes some values when it reads
+# them (compose_changes). Such a password goes into harbor.yml encoded, as b64:<base64>, which Harbor takes as admin's
+# first password, and the installer then sets the real one through Harbor's API (apply_admin_password). A password that
+# itself starts with b64: goes the same way, so the read-back can't mistake it for an encoded one.
+function admin_via_api () {
+  compose_changes "$1" >/dev/null || [[ "$1" == b64:* ]]
+}
+
+# yml_admin_value: what harbor.yml's harbor_admin_password holds for HARBOR_PASSWORD
+function yml_admin_value () {
+  if admin_via_api "$HARBOR_PASSWORD"; then
+    printf 'b64:%s' "$(printf '%s' "$HARBOR_PASSWORD" | base64 -w0)"
+  else
+    printf '%s' "$HARBOR_PASSWORD"
+  fi
+}
+
+# meets_api_rule <password>: Harbor's API rule for a password it sets: 8 to 128 characters, with a lowercase letter, an
+# uppercase letter and a digit (measured on Harbor 2.15)
+function meets_api_rule () {
+  [[ ${#1} -ge 8 && ${#1} -le 128 && "$1" =~ [a-z] && "$1" =~ [A-Z] && "$1" =~ [0-9] ]]
 }
 
 # running_harbor_version: from the containers, or else the record. Empty when neither says.
@@ -1124,6 +1165,9 @@ function preserve_existing_yml_passwords () {
     current=$(yml_password db)
     [[ -n "$current" ]] && HARBOR_DB_PASSWORD="$current"
   fi
+  # The database keeps the password it was created with, so its line in harbor.yml is written back as it is, even from
+  # an older install that wrote it another way (H22). check_existing_db_password has refused a different one.
+  HARBOR_DB_YML_LINE=$(sed -n '/^database:/,/^[^ #]/{s/^  password: *//p}' /opt/harbor/harbor.yml | head -n 1)
 }
 
 # Postgres keeps the password it was created with, so writing a different one to harbor.yml only breaks Harbor
@@ -1139,7 +1183,8 @@ function check_existing_db_password () {
   elif [[ -z "$user_set_harbor_db_password" ]]; then
     echo "Error: $data_dir/database exists, but /opt/harbor/harbor.yml is gone, so the database password is unknown."
     echo "  Writing the wrong one would break Harbor. Pass the password it was created with as HARBOR_DB_PASSWORD."
-    echo "  If nobody chose one when it was first installed, that's the default: HARBOR_DB_PASSWORD=root123"
+    echo "  If nobody chose one and it was installed before v1.4.0, that's Harbor's default: HARBOR_DB_PASSWORD=root123."
+    echo "  From v1.4.0 a first install generates one, kept only in harbor.yml: restore harbor.yml from a backup."
     return 1
   fi
 }
@@ -1162,28 +1207,90 @@ function compose_changes () {
   fi
 }
 
+# H22: characters Harbor 2.15 itself can't take in its database password, measured with each value delivered exactly:
+# a ' leaves Postgres with no password (Harbor's first-boot SQL), and a space breaks core's connection string. docker compose carries any other password in the quoted form
+# yml_db_value writes.
+DB_PASSWORD_REFUSED_DESC="a single quote (') or a space"
+db_password_refused() { [[ "$1" == *[\'\ ]* ]]; }
+
+# check_db_password: a HARBOR_DB_PASSWORD passed to this run is checked before anything changes. One read back from
+# harbor.yml, or generated, is already right.
+function check_db_password () {
+  [[ -n "$user_set_harbor_db_password" ]] || return 0
+  if [[ ${#HARBOR_DB_PASSWORD} -gt 128 ]]; then
+    echo "Error: HARBOR_DB_PASSWORD is over 128 characters. Nothing has been changed."
+    return 1
+  fi
+  if db_password_refused "$HARBOR_DB_PASSWORD"; then
+    echo "Error: HARBOR_DB_PASSWORD can't contain $DB_PASSWORD_REFUSED_DESC: Harbor itself can't take them in its"
+    echo "  database password, and wouldn't start. Nothing has been changed."
+    return 1
+  fi
+}
+
+# compose_dq <value>: the value as a double-quoted env file value (\ " and $ escaped), which docker compose reads back
+# exactly (measured for spec 21's test passwords on compose 5.6.1 and SUSE's 2.33.1)
+function compose_dq () {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//\$/\\\$}
+  printf '"%s"' "$s"
+}
+
+# compose_dq_decode <value>: the reverse, for a value harbor.yml holds in that form
+function compose_dq_decode () {
+  local s=$1 out="" i c
+  s=${s#\"}; s=${s%\"}
+  for ((i = 0; i < ${#s}; i++)); do
+    c=${s:i:1}
+    if [[ "$c" == "\\" && $((i + 1)) -lt ${#s} ]]; then
+      i=$((i + 1)); c=${s:i:1}
+    fi
+    out+=$c
+  done
+  printf '%s' "$out"
+}
+
+# yml_db_value: what harbor.yml's database password holds. Harbor's prepare copies it into env files unquoted, so a
+# password compose would change is written in compose's quoted form (H22). Others are written as typed, as before.
+function yml_db_value () {
+  if compose_changes "$HARBOR_DB_PASSWORD" >/dev/null; then
+    compose_dq "$HARBOR_DB_PASSWORD"
+  else
+    printf '%s' "$HARBOR_DB_PASSWORD"
+  fi
+}
+
+# generate_db_password: 32 letters and digits, for a first install that wasn't given one (H22)
+function generate_db_password () {
+  local p=""
+  while [[ ${#p} -lt 32 ]]; do p+=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9'); done
+  printf '%s' "${p:0:32}"
+}
+
 function check_passwords () {
-  local value why
+  local value
   for value in "$HARBOR_PASSWORD" "$HARBOR_DB_PASSWORD"; do
     if [[ "$value" == *[[:cntrl:]]* ]]; then
-      echo "Error: HARBOR_PASSWORD and HARBOR_DB_PASSWORD can't contain control characters."
+      echo "Error: HARBOR_PASSWORD and HARBOR_DB_PASSWORD can't contain control characters, such as a tab or a newline."
+      echo "  Nothing has been changed."
       return 1
     fi
   done
-  # Harbor's prepare writes the passwords into env files that docker compose reads by its own rules, so admin
-  # would get a different password, and the installer's API calls a 401. Only the values passed reach this check:
-  # a re-run reads harbor.yml's afterwards.
-  if why=$(compose_changes "$HARBOR_PASSWORD"); then
-    echo "Error: HARBOR_PASSWORD has $why. Harbor would create admin with a different password,"
-    echo "  because docker compose changes that when it reads Harbor's env files. Nothing has been changed."
-    echo "  Not allowed: a \$ before a letter, _, { or \$; a # after a space; a space or tab at the start or end; a quote at the start."
+  if [[ ${#HARBOR_PASSWORD} -gt 128 ]]; then
+    echo "Error: HARBOR_PASSWORD is over 128 characters, which Harbor doesn't take. Nothing has been changed."
     return 1
   fi
-  # The database password goes through the same rule in every file that holds it, so Harbor works, with a shorter one
-  if why=$(compose_changes "$HARBOR_DB_PASSWORD"); then
-    echo "  WARNING: HARBOR_DB_PASSWORD has $why. Harbor works, but docker compose gives Postgres a shorter"
-    echo "  password than the one passed. Avoid a \$ before a letter, _, { or \$, a # after a space, spaces at either end, and a leading quote."
+  # H21: any password works. One Harbor's env files can't carry as typed is set through Harbor's API, which has its own
+  # rule. Only a first install applies HARBOR_PASSWORD: with existing data, admin keeps the password it has.
+  if [[ ! -d "$data_dir/database" ]] && admin_via_api "$HARBOR_PASSWORD" && ! meets_api_rule "$HARBOR_PASSWORD"; then
+    echo "Error: HARBOR_PASSWORD needs a lowercase letter, an uppercase letter and a digit. Harbor's own setup files"
+    echo "  can't carry this password as typed, so the installer sets it through Harbor's API, and the API requires"
+    echo "  8 to 128 characters with those three. Nothing has been changed."
+    return 1
   fi
+  check_db_password || return 1
   return 0
 }
 
@@ -1659,6 +1766,58 @@ function wait_for_harbor_api () {
   return 1
 }
 
+# apply_admin_password: H21. When harbor.yml holds the admin password encoded (admin_via_api), a first install starts
+# Harbor with that encoded form as admin's password. This sets the real one through Harbor's API, then checks it logs in.
+# It's safe to repeat: a run after an interruption finds the real password already set, or the encoded one still there.
+# With existing data, admin keeps whatever password it has, as before.
+function apply_admin_password () {
+  admin_via_api "$HARBOR_PASSWORD" || return 0
+  local real_cfg boot_cfg tmp code id attempt max_attempts=$((HARBOR_API_WAIT_SEC / 5)) boot_ok=0
+  real_cfg=$(mktemp); boot_cfg=$(mktemp); tmp=$(mktemp)
+  write_api_cfg "$real_cfg" admin "$HARBOR_PASSWORD"
+  write_api_cfg "$boot_cfg" admin "$(yml_admin_value)"
+  # users/current needs a real login: Harbor answers a wrong one there with 401, not as an anonymous user
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    if [[ "$(api_code "$real_cfg" users/current)" == 200 ]]; then
+      echo "  admin's password is the one passed in HARBOR_PASSWORD."
+      rm -f "$real_cfg" "$boot_cfg" "$tmp"
+      return 0
+    fi
+    if [[ "$(api_code "$boot_cfg" users/current)" == 200 ]]; then
+      boot_ok=1
+      break
+    fi
+    heal_stale_proxy
+    sleep 5
+  done
+  if [[ $boot_ok -eq 0 ]]; then
+    rm -f "$real_cfg" "$boot_cfg" "$tmp"
+    [[ $data_preexisting -eq 1 ]] && return 0
+    echo "  CRITICAL: Harbor didn't accept admin's first password within ${HARBOR_API_WAIT_SEC}s, so HARBOR_PASSWORD"
+    echo "  couldn't be set. Re-run the install to try again; HARBOR_API_WAIT_SEC allows longer."
+    return 1
+  fi
+  id=$(curl -s -K "$boot_cfg" -k "https://$mgmt_ip:$HARBOR_PORT/api/v2.0/users/current" | grep -o '"user_id": *[0-9]*' | grep -o '[0-9]*$')
+  code=$(curl -s -o "$tmp" -w "%{http_code}" -X PUT -H "Content-Type: application/json" -K "$boot_cfg" -k \
+    --data-binary @- "https://$mgmt_ip:$HARBOR_PORT/api/v2.0/users/${id:-1}/password" <<JSON
+{"old_password": "$(dq_escape "$(yml_admin_value)")", "new_password": "$(dq_escape "$HARBOR_PASSWORD")"}
+JSON
+)
+  if [[ "$code" != 200 ]]; then
+    echo "  CRITICAL: Harbor refused to set admin's password (HTTP $code): $(grep -o '"message": *"[^"]*"' "$tmp" | head -n 1 | cut -d'"' -f4)"
+    rm -f "$real_cfg" "$boot_cfg" "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+  if [[ "$(api_code "$real_cfg" users/current)" != 200 ]]; then
+    echo "  CRITICAL: Harbor took admin's new password, but doesn't log in with it."
+    rm -f "$real_cfg" "$boot_cfg"
+    return 1
+  fi
+  rm -f "$real_cfg" "$boot_cfg"
+  echo "  Set admin's password through Harbor's API (HARBOR_PASSWORD has characters Harbor's setup files can't carry)."
+}
+
 create_harbor_projects() {
     local wait_seconds=5
     local max_attempts=$((HARBOR_API_WAIT_SEC / wait_seconds))
@@ -1779,7 +1938,12 @@ function check_root_privileges() {
 
 # gen_harbor_yml [path]: renders harbor.yml, by default to where Harbor reads it
 function gen_harbor_yml () {
-  local dest=${1:-/opt/harbor/harbor.yml}
+  local dest=${1:-/opt/harbor/harbor.yml} db_line
+  if [[ -n "$HARBOR_DB_YML_LINE" ]]; then
+    db_line=$HARBOR_DB_YML_LINE
+  else
+    db_line="\"$(dq_escape "$(yml_db_value)")\""
+  fi
   mkdir -p "$(dirname "$dest")"
   cat > "$dest" <<EOF
 # Configuration file of Harbor
@@ -1828,12 +1992,12 @@ https:
 # The initial password of Harbor admin
 # It only works in first time to install harbor
 # Remember Change the admin password from UI after launching Harbor.
-harbor_admin_password: "$(dq_escape "$HARBOR_PASSWORD")"
+harbor_admin_password: "$(dq_escape "$(yml_admin_value)")"
 
 # Harbor DB configuration
 database:
   # The password for the user('postgres' by default) of Harbor DB. Change this before any production use.
-  password: "$(dq_escape "$HARBOR_DB_PASSWORD")"
+  password: $db_line
   # The maximum number of connections in the idle connection pool. If it <=0, no idle connections are retained.
   max_idle_conns: 100
   # The maximum number of open connections to the database. If it <= 0, then there is no limit on the number of open connections.
