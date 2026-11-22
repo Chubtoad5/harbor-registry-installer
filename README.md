@@ -177,6 +177,7 @@ sudo PROJECTS="dev staging production" bash install_harbor.sh install-harbor
 
 That creates only `dev`, `staging` and `production`. To keep the Chubtoad5 tools' projects as well, add yours to the list
 below.
+To create no projects at all, set `PROJECTS=" "` (a single space): unset and empty both mean the list below.
 
 ### Projects for the Chubtoad5 tools
 
