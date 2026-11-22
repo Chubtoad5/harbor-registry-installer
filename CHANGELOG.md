@@ -1,5 +1,17 @@
 # Changelog — harbor-registry-installer
 
+## v1.5.0 — 2026-11-22 — The Chubtoad5 tools' projects by default
+
+Spec 31 (chubtoad-automation).
+
+### Changed
+- **An install with `PROJECTS` unset or empty creates the projects the Chubtoad5 tools push to:** `rancher`, `e2e-test-images`, `velero`, `fluent`, `prometheus`, `prometheus-operator`, `kube-state-metrics`, `jkroepke`, `ingress-nginx`, `grafana`, `kiwigrid`, `bats`, `chrislusf`, `prom`.
+  Before, it created none, so the first push from rke2-installer or seaweedfs-installer failed on each missing project
+  (`Failed to push image … Skipping`) unless they were made by hand. kube-prometheus-stack 84 and later take their webhook
+  image from `ghcr.io/jkroepke`, which needs the `jkroepke` project. A re-run on an existing Harbor adds the missing
+  ones. `PROJECTS="..."` still creates exactly that list. ap-tools passes its own
+  list, so it isn't affected. README: "Projects for the Chubtoad5 tools".
+
 ## v1.4.0 — 2026-11-12 — Any admin password works; a generated database password
 
 Spec 21 (chubtoad-automation).

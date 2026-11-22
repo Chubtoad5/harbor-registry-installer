@@ -121,7 +121,7 @@ All variables have defaults and can be overridden by exporting them before runni
 | `HARBOR_PASSWORD` | `Harbor12345` | Admin password (change after first login). **Only applied on the very first install** — see [Changing the Admin Password](#changing-the-admin-password). Any 8 to 128 printable characters: see [Passwords](#passwords) |
 | `HARBOR_DB_PASSWORD` | generated | Harbor's internal PostgreSQL password. A first install that isn't given one gets 32 random letters and digits (before v1.4.0, Harbor's published `root123`). An existing install keeps its own. Written into `harbor.yml` (root-only, mode 600). See [Passwords](#passwords) |
 | `DOCKER_BRIDGE_CIDR` | `172.30.0.1/16` | Docker bridge CIDR (`bip`). Merged into an existing `/etc/docker/daemon.json` (via `jq`/`python3`) — never clobbers other settings; skipped if `bip` is already defined |
-| `PROJECTS` | _(empty)_ | Space-separated list of Harbor projects to create |
+| `PROJECTS` | the Chubtoad5 tools' projects | Space-separated list of Harbor projects to create. Unset or empty creates the projects the Chubtoad5 tools push to (see [Projects for the Chubtoad5 tools](#projects-for-the-chubtoad5-tools)); any other value creates exactly those (before v1.5.0, unset created none) |
 | `HARBOR_API_WAIT_SEC` | `60` | How long to wait for the Harbor API after (re)starting it |
 | `LICENSE_OFFER_CONTACT` | the Chubtoad5 project | Who the air-gap bundle's written offer tells people to ask for source code |
 | `HARBOR_FORCE_REDEPLOY` | `false` | `true` runs the full install even when nothing has changed |
@@ -173,6 +173,41 @@ sudo REGISTRY_COMMON_NAME="registry.example.com" HARBOR_PORT=8443 bash install_h
 
 ```bash
 sudo PROJECTS="dev staging production" bash install_harbor.sh install-harbor
+```
+
+That creates only `dev`, `staging` and `production`. To keep the Chubtoad5 tools' projects as well, add yours to the list
+below.
+To create no projects at all, set `PROJECTS=" "` (a single space): unset and empty both mean the list below.
+
+### Projects for the Chubtoad5 tools
+
+A push keeps each image's path under the registry, for example `<registry>/rancher/rke2-runtime`, and Harbor refuses a
+push into a project that doesn't exist (`Failed to push image … Skipping`). So, since v1.5.0, an install with `PROJECTS`
+unset or empty creates every project the Chubtoad5 tools push to, and a push from them works straight away. `library` comes with
+Harbor; markdown-server and SeaweedFS' Caddy push there. A re-run on an existing Harbor adds any of these it lacks and
+leaves the rest alone. ap-tools passes its own list.
+
+| Project | Images from | Used by |
+|:--|:--|:--|
+| `rancher` | docker.io | rke2-installer: RKE2's images, local-path-provisioner, the upgrade controller and its images |
+| `e2e-test-images` | registry.k8s.io | rke2-installer: the DNS utility pod (agnhost) |
+| `velero` | docker.io | rke2-installer: Velero and its AWS plugin |
+| `fluent` | cr.fluentbit.io | rke2-installer: Fluent Bit (monitoring) |
+| `prometheus` | quay.io | rke2-installer: Prometheus, node-exporter, Alertmanager (monitoring) |
+| `prometheus-operator` | quay.io | rke2-installer: the Prometheus operator and its config reloader (monitoring) |
+| `kube-state-metrics` | registry.k8s.io | rke2-installer: kube-state-metrics (monitoring) |
+| `jkroepke` | ghcr.io | rke2-installer: the monitoring chart's webhook certgen, from kube-prometheus-stack 84 |
+| `ingress-nginx` | registry.k8s.io | rke2-installer: the monitoring chart's webhook certgen, before kube-prometheus-stack 84 |
+| `grafana` | docker.io | seaweedfs-installer: Grafana and Loki (monitoring); rke2-installer before v2.1.0: Grafana |
+| `kiwigrid` | quay.io | rke2-installer before v2.1.0: Grafana's sidecar |
+| `bats` | docker.io | rke2-installer before v2.1.0: the chart's test image |
+| `chrislusf` | docker.io | seaweedfs-installer: SeaweedFS |
+| `prom` | docker.io | seaweedfs-installer: Prometheus (monitoring) |
+
+The same list for `PROJECTS`, with your own added at the end:
+
+```bash
+sudo PROJECTS="rancher e2e-test-images velero fluent prometheus prometheus-operator kube-state-metrics jkroepke ingress-nginx grafana kiwigrid bats chrislusf prom dev" bash install_harbor.sh install-harbor
 ```
 
 ### Custom Certificate Fields

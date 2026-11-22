@@ -2,7 +2,7 @@
 
 # This script contains functions for installing a Harbor registry on Ubuntu for storing container images
 
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.5.0"
 
 # Record which variables the caller explicitly set BEFORE defaults are applied, so
 # recorded install-time values from .install-env can fill in unset variables without
@@ -26,7 +26,11 @@ HARBOR_USER_EMAIL=${HARBOR_USER_EMAIL:-""}
 HARBOR_PASSWORD=${HARBOR_PASSWORD:-Harbor12345}
 HARBOR_DB_PASSWORD=${HARBOR_DB_PASSWORD:-root123}
 DOCKER_BRIDGE_CIDR=${DOCKER_BRIDGE_CIDR:-"172.30.0.1/16"}
-PROJECTS=${PROJECTS:-""}
+# The projects the Chubtoad5 tools' pushes need (rke2-installer, seaweedfs-installer), so a push into this Harbor
+# works without making them by hand; README "Projects for the Chubtoad5 tools". Harbor makes "library" itself.
+# Unset or empty = this list; any other value = exactly those projects.
+SUITE_PROJECTS="rancher e2e-test-images velero fluent prometheus prometheus-operator kube-state-metrics jkroepke ingress-nginx grafana kiwigrid bats chrislusf prom"
+PROJECTS=${PROJECTS:-$SUITE_PROJECTS}
 # How long to wait for the Harbor API after (re)starting it
 HARBOR_API_WAIT_SEC=${HARBOR_API_WAIT_SEC:-60}
 # true = run the full install even when nothing has changed
